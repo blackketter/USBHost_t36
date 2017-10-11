@@ -322,6 +322,9 @@ protected:
 // All USB device drivers inherit from this base class.
 class USBDriver : public USBHost {
 public:
+	operator bool() { return (device != nullptr); }
+	uint16_t idVendor() { return (device != nullptr) ? device->idVendor : 0; }
+	uint16_t idProduct() { return (device != nullptr) ? device->idProduct : 0; }
 	// TODO: user-level functions
 	// check if device is bound/active/online
 	// query vid, pid
@@ -402,6 +405,10 @@ private:
 // Device drivers may inherit from this base class, if they wish to receive
 // HID input data fully decoded by the USBHIDParser driver
 class USBHIDInput {
+public:
+	operator bool() { return (mydevice != nullptr); }
+	uint16_t idVendor() { return (mydevice != nullptr) ? mydevice->idVendor : 0; }
+	uint16_t idProduct() { return (mydevice != nullptr) ? mydevice->idProduct : 0; }
 private:
 	virtual bool claim_collection(Device_t *dev, uint32_t topusage);
 	virtual void hid_input_begin(uint32_t topusage, uint32_t type, int lgmin, int lgmax);
@@ -411,6 +418,8 @@ private:
 	void add_to_list();
 	USBHIDInput *next;
 	friend class USBHIDParser;
+protected:
+	Device_t *mydevice = NULL;
 };
 
 /************************************************/
@@ -533,6 +542,18 @@ private:
 
 class KeyboardController : public USBDriver /* , public USBHIDInput */ {
 public:
+typedef union {
+   struct {
+        uint8_t numLock : 1;
+        uint8_t capsLock : 1;
+        uint8_t scrollLock : 1;
+        uint8_t compose : 1;
+        uint8_t kana : 1;
+        uint8_t reserved : 3;
+        };
+    uint8_t byte;
+} KBDLeds_t;
+public:
 	KeyboardController(USBHost &host) { init(); }
 	KeyboardController(USBHost *host) { init(); }
 	KeyboardController() { init(); }
@@ -543,6 +564,15 @@ public:
 	uint8_t  getOemKey() { return keyOEM; }
 	void     attachPress(void (*f)(int unicode)) { keyPressedFunction = f; }
 	void     attachRelease(void (*f)(int unicode)) { keyReleasedFunction = f; }
+	void     LEDS(uint8_t leds);
+	uint8_t  LEDS() {return leds_.byte;}
+	void     updateLEDS(void);
+	bool     numLock() {return leds_.numLock;}
+	bool     capsLock() {return leds_.capsLock;}
+	bool     scrollLock() {return leds_.scrollLock;}
+	void	 numLock(bool f);
+	void     capsLock(bool f);
+	void	 scrollLock(bool f);
 protected:
 	virtual bool claim(Device_t *device, int type, const uint8_t *descriptors, uint32_t len);
 	virtual void control(const Transfer_t *transfer);
@@ -564,6 +594,9 @@ private:
 	uint8_t modifiers;
 	uint8_t keyOEM;
 	uint8_t prev_report[8];
+	KBDLeds_t leds_ = {0};
+	bool update_leds_ = false;
+	bool processing_new_data_ = false;
 	Pipe_t mypipes[2] __attribute__ ((aligned(32)));
 	Transfer_t mytransfers[4] __attribute__ ((aligned(32)));
 };
@@ -729,7 +762,6 @@ protected:
 	virtual void hid_input_end();
 	virtual void disconnect_collection(Device_t *dev);
 private:
-	Device_t *mydevice = NULL;
 	uint8_t collections_claimed = 0;
 	volatile bool mouseEvent = false;
 	uint8_t buttons = 0;
@@ -754,7 +786,6 @@ protected:
 	virtual void hid_input_end();
 	virtual void disconnect_collection(Device_t *dev);
 private:
-	Device_t *mydevice = NULL;
 	uint8_t collections_claimed = 0;
 	bool anychange = false;
 	volatile bool joystickEvent = false;
