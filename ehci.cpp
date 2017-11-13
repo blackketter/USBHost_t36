@@ -54,7 +54,11 @@
 // slowest rate we can poll interrupt endpoints.  Each entry uses
 // 12 bytes (4 for a pointer, 8 for bandwidth management).
 // Supported values: 8, 16, 32, 64, 128, 256, 512, 1024
+#if defined(USBHS_PERIODIC_LIST_SIZE)
+#define PERIODIC_LIST_SIZE (USBHS_PERIODIC_LIST_SIZE)
+#else
 #define PERIODIC_LIST_SIZE  32
+#endif
 
 // The EHCI periodic schedule, used for interrupt pipes/endpoints
 static uint32_t periodictable[PERIODIC_LIST_SIZE] __attribute__ ((aligned(4096), used));
@@ -96,6 +100,9 @@ static void add_to_async_followup_list(Transfer_t *first, Transfer_t *last);
 static void remove_from_async_followup_list(Transfer_t *transfer);
 static void add_to_periodic_followup_list(Transfer_t *first, Transfer_t *last);
 static void remove_from_periodic_followup_list(Transfer_t *transfer);
+
+#define print   USBHost::print_
+#define println USBHost::println_
 
 void USBHost::begin()
 {
@@ -393,13 +400,13 @@ void USBHost::isr()
 
 void USBDriverTimer::start(uint32_t microseconds)
 {
-#ifdef USBHOST_PRINT_DEBUG
-	Serial.print("start_timer, us = ");
-	Serial.print(microseconds);
-	Serial.print(", driver = ");
-	Serial.print((uint32_t)driver, HEX);
-	Serial.print(", this = ");
-	Serial.println((uint32_t)this, HEX);
+#if 0
+	USBHost::print_("start_timer, us = ");
+	USBHost::print_(microseconds);
+	USBHost::print_(", driver = ");
+	USBHost::print_((uint32_t)driver, HEX);
+	USBHost::print_(", this = ");
+	USBHost::println_((uint32_t)this, HEX);
 #endif
 	if (!driver) return;
 	if (microseconds < 100) return; // minimum timer duration
@@ -455,6 +462,39 @@ void USBDriverTimer::start(uint32_t microseconds)
 	next = NULL;
 	prev = list;
 	list->next = this;
+}
+
+void USBDriverTimer::stop()
+{
+	__disable_irq();
+	if (active_timers) {
+		if (active_timers == this) {
+			USBHS_GPTIMER1CTL = 0;
+			if (next) {
+				uint32_t usec_til_next = USBHS_GPTIMER1CTL & 0xFFFFFF;
+				usec_til_next += next->usec;
+				next->usec = usec_til_next;
+				USBHS_GPTIMER1LD = usec_til_next;
+				USBHS_GPTIMER1CTL = USBHS_GPTIMERCTL_RST | USBHS_GPTIMERCTL_RUN;
+				next->prev = NULL;
+				active_timers = next;
+			} else {
+				active_timers = NULL;
+			}
+		} else {
+			for (USBDriverTimer *t = active_timers->next; t; t = t->next) {
+				if (t == this) {
+					t->prev->next = t->next;
+					if (t->next) {
+						t->next->usec += t->usec;
+						t->next->prev = t->prev;
+					}
+					break;
+				}
+			}
+		}
+	}
+	__enable_irq();
 }
 
 

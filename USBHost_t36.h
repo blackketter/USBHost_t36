@@ -88,6 +88,31 @@ typedef struct Transfer_struct     Transfer_t;
 class USBDriver;
 class USBDriverTimer;
 
+/************************************************/
+/*  Added Defines                               */
+/************************************************/
+#define KEYD_UP    		0xDA
+#define KEYD_DOWN    	0xD9
+#define KEYD_LEFT   	0xD8
+#define KEYD_RIGHT   	0xD7
+#define KEYD_INSERT		0xD1
+#define KEYD_DELETE		0xD4
+#define KEYD_PAGE_UP    0xD3
+#define KEYD_PAGE_DOWN  0xD6
+#define KEYD_HOME      	0xD2
+#define KEYD_END       	0xD5
+#define KEYD_F1        	0xC2
+#define KEYD_F2        	0xC3
+#define KEYD_F3        	0xC4
+#define KEYD_F4        	0xC5
+#define KEYD_F5        	0xC6
+#define KEYD_F6        	0xC7
+#define KEYD_F7        	0xC8
+#define KEYD_F8        	0xC9
+#define KEYD_F9        	0xCA
+#define KEYD_F10       	0xCB
+#define KEYD_F11       	0xCC
+#define KEYD_F12       	0xCD
 
 /************************************************/
 /*  Data Structure Definitions                  */
@@ -115,12 +140,22 @@ typedef union {
  };
 } setup_t;
 
+typedef struct {
+	enum {STRING_BUF_SIZE=50};
+	enum {STR_ID_MAN=0, STR_ID_PROD, STR_ID_SERIAL, STR_ID_CNT};
+	uint8_t iStrings[STR_ID_CNT];	// Index into array for the three indexes
+	uint8_t buffer[STRING_BUF_SIZE];
+} strbuf_t;
+
+#define DEVICE_STRUCT_STRING_BUF_SIZE 50
+
 // Device_t holds all the information about a USB device
 struct Device_struct {
 	Pipe_t   *control_pipe;
 	Pipe_t   *data_pipes;
 	Device_t *next;
 	USBDriver *drivers;
+	strbuf_t *strbuf;
 	uint8_t  speed; // 0=12, 1=1.5, 2=480 Mbit/sec
 	uint8_t  address;
 	uint8_t  hub_address;
@@ -220,9 +255,11 @@ protected:
 	static void contribute_Devices(Device_t *devices, uint32_t num);
 	static void contribute_Pipes(Pipe_t *pipes, uint32_t num);
 	static void contribute_Transfers(Transfer_t *transfers, uint32_t num);
+	static void contribute_String_Buffers(strbuf_t *strbuf, uint32_t num);
 	static volatile bool enumeration_busy;
 private:
 	static void isr();
+	static void convertStringDescriptorToASCIIString(uint8_t string_index, Device_t *dev, const Transfer_t *transfer);
 	static void claim_drivers(Device_t *dev);
 	static uint32_t assign_address(void);
 	static bool queue_Transfer(Pipe_t *pipe, Transfer_t *transfer);
@@ -234,6 +271,8 @@ private:
 	static void free_Pipe(Pipe_t *q);
 	static Transfer_t * allocate_Transfer(void);
 	static void free_Transfer(Transfer_t *q);
+	static strbuf_t * allocate_string_buffer(void);
+	static void free_string_buffer(strbuf_t *strbuf);
 	static bool allocate_interrupt_pipe_bandwidth(Pipe_t *pipe,
 		uint32_t maxlen, uint32_t interval);
 	static void add_qh_to_periodic_schedule(Pipe_t *pipe);
@@ -241,71 +280,72 @@ private:
 	static void followup_Error(void);
 protected:
 #ifdef USBHOST_PRINT_DEBUG
-	static void print(const Transfer_t *transfer);
-	static void print(const Transfer_t *first, const Transfer_t *last);
+	static void print_(const Transfer_t *transfer);
+	static void print_(const Transfer_t *first, const Transfer_t *last);
 	static void print_token(uint32_t token);
-	static void print(const Pipe_t *pipe);
+	static void print_(const Pipe_t *pipe);
 	static void print_driverlist(const char *name, const USBDriver *driver);
 	static void print_qh_list(const Pipe_t *list);
 	static void print_hexbytes(const void *ptr, uint32_t len);
-	static void print(const char *s)	{ Serial.print(s); }
-	static void print(int n)		{ Serial.print(n); }
-	static void print(unsigned int n)	{ Serial.print(n); }
-	static void print(long n)		{ Serial.print(n); }
-	static void print(unsigned long n)	{ Serial.print(n); }
-	static void println(const char *s)	{ Serial.println(s); }
-	static void println(int n)		{ Serial.println(n); }
-	static void println(unsigned int n)	{ Serial.println(n); }
-	static void println(long n)		{ Serial.println(n); }
-	static void println(unsigned long n)	{ Serial.println(n); }
-	static void println()			{ Serial.println(); }
-	static void print(uint32_t n, uint8_t b) { Serial.print(n, b); }
-	static void println(uint32_t n, uint8_t b) { Serial.println(n, b); }
-	static void print(const char *s, int n, uint8_t b = DEC) {
+	static void print_(const char *s)	{ Serial.print(s); }
+	static void print_(int n)		{ Serial.print(n); }
+	static void print_(unsigned int n)	{ Serial.print(n); }
+	static void print_(long n)		{ Serial.print(n); }
+	static void print_(unsigned long n)	{ Serial.print(n); }
+	static void println_(const char *s)	{ Serial.println(s); }
+	static void println_(int n)		{ Serial.println(n); }
+	static void println_(unsigned int n)	{ Serial.println(n); }
+	static void println_(long n)		{ Serial.println(n); }
+	static void println_(unsigned long n)	{ Serial.println(n); }
+	static void println_()			{ Serial.println(); }
+	static void print_(uint32_t n, uint8_t b) { Serial.print(n, b); }
+	static void println_(uint32_t n, uint8_t b) { Serial.println(n, b); }
+	static void print_(const char *s, int n, uint8_t b = DEC) {
 		Serial.print(s); Serial.print(n, b); }
-	static void print(const char *s, unsigned int n, uint8_t b = DEC) {
+	static void print_(const char *s, unsigned int n, uint8_t b = DEC) {
 		Serial.print(s); Serial.print(n, b); }
-	static void print(const char *s, long n, uint8_t b = DEC) {
+	static void print_(const char *s, long n, uint8_t b = DEC) {
 		Serial.print(s); Serial.print(n, b); }
-	static void print(const char *s, unsigned long n, uint8_t b = DEC) {
+	static void print_(const char *s, unsigned long n, uint8_t b = DEC) {
 		Serial.print(s); Serial.print(n, b); }
-	static void println(const char *s, int n, uint8_t b = DEC) {
+	static void println_(const char *s, int n, uint8_t b = DEC) {
 		Serial.print(s); Serial.println(n, b); }
-	static void println(const char *s, unsigned int n, uint8_t b = DEC) {
+	static void println_(const char *s, unsigned int n, uint8_t b = DEC) {
 		Serial.print(s); Serial.println(n, b); }
-	static void println(const char *s, long n, uint8_t b = DEC) {
+	static void println_(const char *s, long n, uint8_t b = DEC) {
 		Serial.print(s); Serial.println(n, b); }
-	static void println(const char *s, unsigned long n, uint8_t b = DEC) {
+	static void println_(const char *s, unsigned long n, uint8_t b = DEC) {
 		Serial.print(s); Serial.println(n, b); }
+	friend class USBDriverTimer; // for access to print & println
 #else
-	static void print(const Transfer_t *transfer) {}
-	static void print(const Transfer_t *first, const Transfer_t *last) {}
+	static void print_(const Transfer_t *transfer) {}
+	static void print_(const Transfer_t *first, const Transfer_t *last) {}
 	static void print_token(uint32_t token) {}
-	static void print(const Pipe_t *pipe) {}
+	static void print_(const Pipe_t *pipe) {}
 	static void print_driverlist(const char *name, const USBDriver *driver) {}
 	static void print_qh_list(const Pipe_t *list) {}
 	static void print_hexbytes(const void *ptr, uint32_t len) {}
-	static void print(const char *s) {}
-	static void print(int n) {}
-	static void print(unsigned int n) {}
-	static void print(long n) {}
-	static void print(unsigned long n) {}
-	static void println(const char *s) {}
-	static void println(int n) {}
-	static void println(unsigned int n) {}
-	static void println(long n) {}
-	static void println(unsigned long n) {}
-	static void println() {}
-	static void print(uint32_t n, uint8_t b) {}
-	static void println(uint32_t n, uint8_t b) {}
-	static void print(const char *s, int n, uint8_t b = DEC) {}
-	static void print(const char *s, unsigned int n, uint8_t b = DEC) {}
-	static void print(const char *s, long n, uint8_t b = DEC) {}
-	static void print(const char *s, unsigned long n, uint8_t b = DEC) {}
-	static void println(const char *s, int n, uint8_t b = DEC) {}
-	static void println(const char *s, unsigned int n, uint8_t b = DEC) {}
-	static void println(const char *s, long n, uint8_t b = DEC) {}
-	static void println(const char *s, unsigned long n, uint8_t b = DEC) {}
+	static void print_(const char *s) {}
+	static void print_(int n) {}
+	static void print_(unsigned int n) {}
+	static void print_(long n) {}
+	static void print_(unsigned long n) {}
+	static void println_(const char *s) {}
+	static void println_(int n) {}
+	static void println_(unsigned int n) {}
+	static void println_(long n) {}
+	static void println_(unsigned long n) {}
+	static void println_() {}
+	static void print_(uint32_t n, uint8_t b) {}
+	static void println_(uint32_t n, uint8_t b) {}
+	static void print_(const char *s, int n, uint8_t b = DEC) {}
+	static void print_(const char *s, unsigned int n, uint8_t b = DEC) {}
+	static void print_(const char *s, long n, uint8_t b = DEC) {}
+	static void print_(const char *s, unsigned long n, uint8_t b = DEC) {}
+	static void println_(const char *s, int n, uint8_t b = DEC) {}
+	static void println_(const char *s, unsigned int n, uint8_t b = DEC) {}
+	static void println_(const char *s, long n, uint8_t b = DEC) {}
+	static void println_(const char *s, unsigned long n, uint8_t b = DEC) {}
 #endif
 	static void mk_setup(setup_t &s, uint32_t bmRequestType, uint32_t bRequest,
 			uint32_t wValue, uint32_t wIndex, uint32_t wLength) {
@@ -325,6 +365,14 @@ public:
 	operator bool() { return (device != nullptr); }
 	uint16_t idVendor() { return (device != nullptr) ? device->idVendor : 0; }
 	uint16_t idProduct() { return (device != nullptr) ? device->idProduct : 0; }
+
+	const uint8_t *manufacturer()
+		{  return  ((device == nullptr) || (device->strbuf == nullptr)) ? nullptr : &device->strbuf->buffer[device->strbuf->iStrings[strbuf_t::STR_ID_MAN]]; }
+	const uint8_t *product()
+		{  return  ((device == nullptr) || (device->strbuf == nullptr)) ? nullptr : &device->strbuf->buffer[device->strbuf->iStrings[strbuf_t::STR_ID_PROD]]; }
+	const uint8_t *serialNumber()
+		{  return  ((device == nullptr) || (device->strbuf == nullptr)) ? nullptr : &device->strbuf->buffer[device->strbuf->iStrings[strbuf_t::STR_ID_SERIAL]]; }
+
 	// TODO: user-level functions
 	// check if device is bound/active/online
 	// query vid, pid
@@ -380,7 +428,6 @@ protected:
 	// wish to claim any device or interface (eg, if getting data
 	// from the HID parser).
 	Device_t *device;
-
 	friend class USBHost;
 };
 
@@ -391,6 +438,7 @@ public:
 	USBDriverTimer(USBDriver *d) : driver(d) { }
 	void init(USBDriver *d) { driver = d; };
 	void start(uint32_t microseconds);
+	void stop();
 	void *pointer;
 	uint32_t integer;
 	uint32_t started_micros; // testing only
@@ -409,6 +457,13 @@ public:
 	operator bool() { return (mydevice != nullptr); }
 	uint16_t idVendor() { return (mydevice != nullptr) ? mydevice->idVendor : 0; }
 	uint16_t idProduct() { return (mydevice != nullptr) ? mydevice->idProduct : 0; }
+	const uint8_t *manufacturer()
+		{  return  ((mydevice == nullptr) || (mydevice->strbuf == nullptr)) ? nullptr : &mydevice->strbuf->buffer[mydevice->strbuf->iStrings[strbuf_t::STR_ID_MAN]]; }
+	const uint8_t *product()
+		{  return  ((mydevice == nullptr) || (mydevice->strbuf == nullptr)) ? nullptr : &mydevice->strbuf->buffer[mydevice->strbuf->iStrings[strbuf_t::STR_ID_PROD]]; }
+	const uint8_t *serialNumber()
+		{  return  ((mydevice == nullptr) || (mydevice->strbuf == nullptr)) ? nullptr : &mydevice->strbuf->buffer[mydevice->strbuf->iStrings[strbuf_t::STR_ID_SERIAL]]; }
+
 private:
 	virtual bool claim_collection(Device_t *dev, uint32_t topusage);
 	virtual void hid_input_begin(uint32_t topusage, uint32_t type, int lgmin, int lgmax);
@@ -472,6 +527,7 @@ private:
 	Device_t mydevices[MAXPORTS];
 	Pipe_t mypipes[2] __attribute__ ((aligned(32)));
 	Transfer_t mytransfers[4] __attribute__ ((aligned(32)));
+	strbuf_t mystring_bufs[1];
 	USBDriverTimer debouncetimer;
 	USBDriverTimer resettimer;
 	setup_t setup;
@@ -501,6 +557,7 @@ private:
 	static volatile bool reset_busy;
 };
 
+//--------------------------------------------------------------------------
 
 class USBHIDParser : public USBDriver {
 public:
@@ -508,7 +565,7 @@ public:
 	static void driver_ready_for_hid_collection(USBHIDInput *driver);
 protected:
 	enum { TOPUSAGE_LIST_LEN = 4 };
-	enum { USAGE_LIST_LEN = 12 };
+	enum { USAGE_LIST_LEN = 24 };
 	virtual bool claim(Device_t *device, int type, const uint8_t *descriptors, uint32_t len);
 	virtual void control(const Transfer_t *transfer);
 	virtual void disconnect();
@@ -536,9 +593,10 @@ private:
 	bool use_report_id;
 	Pipe_t mypipes[3] __attribute__ ((aligned(32)));
 	Transfer_t mytransfers[4] __attribute__ ((aligned(32)));
+	strbuf_t mystring_bufs[1];
 };
 
-
+//--------------------------------------------------------------------------
 
 class KeyboardController : public USBDriver /* , public USBHIDInput */ {
 public:
@@ -599,7 +657,91 @@ private:
 	bool processing_new_data_ = false;
 	Pipe_t mypipes[2] __attribute__ ((aligned(32)));
 	Transfer_t mytransfers[4] __attribute__ ((aligned(32)));
+	strbuf_t mystring_bufs[1];
 };
+
+//--------------------------------------------------------------------------
+
+class KeyboardHIDExtrasController : public USBHIDInput {
+public:
+	KeyboardHIDExtrasController(USBHost &host) { USBHIDParser::driver_ready_for_hid_collection(this); }
+	void	clear() { event_ = false;}
+	bool	available() { return event_; }
+	void     attachPress(void (*f)(uint32_t top, uint16_t code)) { keyPressedFunction = f; }
+	void     attachRelease(void (*f)(uint32_t top, uint16_t code)) { keyReleasedFunction = f; }
+	enum {MAX_KEYS_DOWN=4};
+//	uint32_t buttons() { return buttons_; }
+protected:
+	virtual bool claim_collection(Device_t *dev, uint32_t topusage);
+	virtual void hid_input_begin(uint32_t topusage, uint32_t type, int lgmin, int lgmax);
+	virtual void hid_input_data(uint32_t usage, int32_t value);
+	virtual void hid_input_end();
+	virtual void disconnect_collection(Device_t *dev);
+private:
+	void (*keyPressedFunction)(uint32_t top, uint16_t code);
+	void (*keyReleasedFunction)(uint32_t top, uint16_t code);
+	uint32_t topusage_ = 0;					// What top report am I processing?
+	uint8_t collections_claimed_ = 0;
+	volatile bool event_ = false;
+	volatile bool hid_input_begin_ = false;
+	volatile bool hid_input_data_ = false; 	// did we receive any valid data with report?
+	uint8_t count_keys_down_ = 0;
+	uint16_t keys_down[MAX_KEYS_DOWN];
+};
+
+//--------------------------------------------------------------------------
+
+class MouseController : public USBHIDInput {
+public:
+	MouseController(USBHost &host) { USBHIDParser::driver_ready_for_hid_collection(this); }
+	bool	available() { return mouseEvent; }
+	void	mouseDataClear();
+	uint8_t getButtons() { return buttons; }
+	int     getMouseX() { return mouseX; }
+	int     getMouseY() { return mouseY; }
+	int     getWheel() { return wheel; }
+	int     getWheelH() { return wheelH; }
+protected:
+	virtual bool claim_collection(Device_t *dev, uint32_t topusage);
+	virtual void hid_input_begin(uint32_t topusage, uint32_t type, int lgmin, int lgmax);
+	virtual void hid_input_data(uint32_t usage, int32_t value);
+	virtual void hid_input_end();
+	virtual void disconnect_collection(Device_t *dev);
+private:
+	uint8_t collections_claimed = 0;
+	volatile bool mouseEvent = false;
+	volatile bool hid_input_begin_ = false;
+	uint8_t buttons = 0;
+	int     mouseX = 0;
+	int     mouseY = 0;
+	int     wheel = 0;
+	int     wheelH = 0;
+};
+
+//--------------------------------------------------------------------------
+
+class JoystickController : public USBHIDInput {
+public:
+	JoystickController(USBHost &host) { USBHIDParser::driver_ready_for_hid_collection(this); }
+	bool    available() { return joystickEvent; }
+	void    joystickDataClear();
+	uint32_t getButtons() { return buttons; }
+	int	getAxis(uint32_t index) { return (index < (sizeof(axis)/sizeof(axis[0]))) ? axis[index] : 0; }
+protected:
+	virtual bool claim_collection(Device_t *dev, uint32_t topusage);
+	virtual void hid_input_begin(uint32_t topusage, uint32_t type, int lgmin, int lgmax);
+	virtual void hid_input_data(uint32_t usage, int32_t value);
+	virtual void hid_input_end();
+	virtual void disconnect_collection(Device_t *dev);
+private:
+	uint8_t collections_claimed = 0;
+	bool anychange = false;
+	volatile bool joystickEvent = false;
+	uint32_t buttons = 0;
+	int16_t axis[10] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+};
+
+//--------------------------------------------------------------------------
 
 class MIDIDevice : public USBDriver {
 public:
@@ -742,55 +884,293 @@ private:
 	void (*handleTimeCodeQuarterFrame)(uint16_t data);
 	Pipe_t mypipes[3] __attribute__ ((aligned(32)));
 	Transfer_t mytransfers[7] __attribute__ ((aligned(32)));
+	strbuf_t mystring_bufs[1];
 };
 
+//--------------------------------------------------------------------------
 
-class MouseController : public USBHIDInput {
+class USBSerial: public USBDriver, public Stream {
 public:
-	MouseController(USBHost &host) { USBHIDParser::driver_ready_for_hid_collection(this); }
-	bool	available() { return mouseEvent; }
-	void	mouseDataClear();
-	uint8_t getButtons() { return buttons; }
-	int     getMouseX() { return mouseX; }
-	int     getMouseY() { return mouseY; }
-	int     getWheel() { return wheel; }
-	int     getWheelH() { return wheelH; }
+	// FIXME: need different USBSerial, with bigger buffers for 480 Mbit & faster speed
+	enum { BUFFER_SIZE = 648 }; // must hold at least 6 max size packets, plus 2 extra bytes
+	USBSerial(USBHost &host) : txtimer(this) { init(); }
+	void begin(uint32_t baud, uint32_t format=0);
+	void end(void);
+	virtual int available(void);
+	virtual int peek(void);
+	virtual int read(void);
+	virtual int availableForWrite();
+	virtual size_t write(uint8_t c);
+
+	using Print::write;
 protected:
-	virtual bool claim_collection(Device_t *dev, uint32_t topusage);
-	virtual void hid_input_begin(uint32_t topusage, uint32_t type, int lgmin, int lgmax);
-	virtual void hid_input_data(uint32_t usage, int32_t value);
-	virtual void hid_input_end();
-	virtual void disconnect_collection(Device_t *dev);
+	virtual bool claim(Device_t *device, int type, const uint8_t *descriptors, uint32_t len);
+	virtual void control(const Transfer_t *transfer);
+	virtual void disconnect();
+	virtual void timer_event(USBDriverTimer *whichTimer);
 private:
-	uint8_t collections_claimed = 0;
-	volatile bool mouseEvent = false;
-	uint8_t buttons = 0;
-	int     mouseX = 0;
-	int     mouseY = 0;
-	int     wheel = 0;
-	int     wheelH = 0;
+	static void rx_callback(const Transfer_t *transfer);
+	static void tx_callback(const Transfer_t *transfer);
+	void rx_data(const Transfer_t *transfer);
+	void tx_data(const Transfer_t *transfer);
+	void rx_queue_packets(uint32_t head, uint32_t tail);
+	void init();
+	static bool check_rxtx_ep(uint32_t &rxep, uint32_t &txep);
+	bool init_buffers(uint32_t rsize, uint32_t tsize);
+private:
+	Pipe_t mypipes[3] __attribute__ ((aligned(32)));
+	Transfer_t mytransfers[7] __attribute__ ((aligned(32)));
+	strbuf_t mystring_bufs[1];
+	USBDriverTimer txtimer;
+	uint32_t bigbuffer[(BUFFER_SIZE+3)/4];
+	setup_t setup;
+	uint8_t setupdata[8];
+	uint32_t baudrate;
+	Pipe_t *rxpipe;
+	Pipe_t *txpipe;
+	uint8_t *rx1;	// location for first incoming packet
+	uint8_t *rx2;	// location for second incoming packet
+	uint8_t *rxbuf;	// receive circular buffer
+	uint8_t *tx1;	// location for first outgoing packet
+	uint8_t *tx2;	// location for second outgoing packet
+	uint8_t *txbuf;
+	volatile uint16_t rxhead;// receive head
+	volatile uint16_t rxtail;// receive tail
+	volatile uint16_t txhead;
+	volatile uint16_t txtail;
+	uint16_t rxsize;// size of receive circular buffer
+	uint16_t txsize;// size of transmit circular buffer
+	volatile uint8_t  rxstate;// bitmask: which receive packets are queued
+	volatile uint8_t  txstate;
+	uint8_t pending_control;
+	uint8_t setup_state;	// PL2303 - has several steps... Could use pending control?
+	uint8_t pl2303_v1;		// Which version do we have
+	uint8_t pl2303_v2;
+	uint8_t interface;
+	bool control_queued;
+	enum { CDCACM, FTDI, PL2303, CH341 } sertype;
 };
 
+//--------------------------------------------------------------------------
 
-class JoystickController : public USBHIDInput {
+class AntPlus: public USBDriver {
+// Please post any AntPlus feedback or contributions on this forum thread:
+// https://forum.pjrc.com/threads/43110-Ant-libarary-and-USB-driver-for-Teensy-3-5-6
 public:
-	JoystickController(USBHost &host) { USBHIDParser::driver_ready_for_hid_collection(this); }
-	bool    available() { return joystickEvent; }
-	void    joystickDataClear();
-	uint32_t getButtons() { return buttons; }
-	int	getAxis(uint32_t index) { return (index < (sizeof(axis)/sizeof(axis[0]))) ? axis[index] : 0; }
+	AntPlus(USBHost &host) : /* txtimer(this),*/  updatetimer(this) { init(); }
+	void begin(const uint8_t key=0);
+	void onStatusChange(void (*function)(int channel, int status)) {
+		user_onStatusChange = function;
+	}
+	void onDeviceID(void (*function)(int channel, int devId, int devType, int transType)) {
+		user_onDeviceID = function;
+	}
+	void onHeartRateMonitor(void (*f)(int bpm, int msec, int seqNum), uint32_t devid=0) {
+		profileSetup_HRM(&ant.dcfg[PROFILE_HRM], devid);
+		memset(&hrm, 0, sizeof(hrm));
+		user_onHeartRateMonitor = f;
+	}
+	void onSpeedCadence(void (*f)(float speed, float distance, float rpm), uint32_t devid=0) {
+		profileSetup_SPDCAD(&ant.dcfg[PROFILE_SPDCAD], devid);
+		memset(&spdcad, 0, sizeof(spdcad));
+		user_onSpeedCadence = f;
+	}
+	void onSpeed(void (*f)(float speed, float distance), uint32_t devid=0) {
+		profileSetup_SPEED(&ant.dcfg[PROFILE_SPEED], devid);
+		memset(&spd, 0, sizeof(spd));
+		user_onSpeed = f;
+	}
+	void onCadence(void (*f)(float rpm), uint32_t devid=0) {
+		profileSetup_CADENCE(&ant.dcfg[PROFILE_CADENCE], devid);
+		memset(&cad, 0, sizeof(cad));
+		user_onCadence = f;
+	}
+	void setWheelCircumference(float meters) {
+		wheelCircumference = meters * 1000.0f;
+	}
 protected:
-	virtual bool claim_collection(Device_t *dev, uint32_t topusage);
-	virtual void hid_input_begin(uint32_t topusage, uint32_t type, int lgmin, int lgmax);
-	virtual void hid_input_data(uint32_t usage, int32_t value);
-	virtual void hid_input_end();
-	virtual void disconnect_collection(Device_t *dev);
+	virtual void Task();
+	virtual bool claim(Device_t *device, int type, const uint8_t *descriptors, uint32_t len);
+	virtual void disconnect();
+	virtual void timer_event(USBDriverTimer *whichTimer);
 private:
-	uint8_t collections_claimed = 0;
-	bool anychange = false;
-	volatile bool joystickEvent = false;
-	uint32_t buttons = 0;
-	int16_t axis[10] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+	static void rx_callback(const Transfer_t *transfer);
+	static void tx_callback(const Transfer_t *transfer);
+	void rx_data(const Transfer_t *transfer);
+	void tx_data(const Transfer_t *transfer);
+	void init();
+	size_t write(const void *data, const size_t size);
+	int read(void *data, const size_t size);
+	void transmit();
+private:
+	Pipe_t mypipes[2] __attribute__ ((aligned(32)));
+	Transfer_t mytransfers[3] __attribute__ ((aligned(32)));
+	strbuf_t mystring_bufs[1];
+	//USBDriverTimer txtimer;
+	USBDriverTimer updatetimer;
+	Pipe_t *rxpipe;
+	Pipe_t *txpipe;
+	bool first_update;
+	uint8_t txbuffer[240];
+	uint8_t rxpacket[64];
+	volatile uint16_t txhead;
+	volatile uint16_t txtail;
+	volatile bool     txready;
+	volatile uint8_t  rxlen;
+	volatile bool     do_polling;
+private:
+	enum _eventi {
+		EVENTI_MESSAGE = 0,
+		EVENTI_CHANNEL,
+		EVENTI_TOTAL
+	};
+	enum _profiles {
+		PROFILE_HRM = 0,
+		PROFILE_SPDCAD,
+		PROFILE_POWER,
+		PROFILE_STRIDE,
+		PROFILE_SPEED,
+		PROFILE_CADENCE,
+		PROFILE_TOTAL
+	};
+	typedef struct {
+		uint8_t channel;
+		uint8_t RFFreq;
+		uint8_t networkNumber;
+		uint8_t stub;
+		uint8_t searchTimeout;
+		uint8_t channelType;
+		uint8_t deviceType;
+		uint8_t transType;
+		uint16_t channelPeriod;
+		uint16_t searchWaveform;
+		uint32_t deviceNumber; // deviceId
+		struct {
+			uint8_t chanIdOnce;
+			uint8_t keyAccepted;
+			uint8_t profileValid;
+			uint8_t channelStatus;
+			uint8_t channelStatusOld;
+		} flags;
+	} TDCONFIG;
+	struct {
+		uint8_t initOnce;
+		uint8_t key; // key index
+		int iDevice; // index to the antplus we're interested in, if > one found
+		TDCONFIG dcfg[PROFILE_TOTAL]; // channel config, we're using one channel per device
+	} ant;
+	void (*user_onStatusChange)(int channel, int status);
+	void (*user_onDeviceID)(int channel, int devId, int devType, int transType);
+	void (*user_onHeartRateMonitor)(int beatsPerMinute, int milliseconds, int sequenceNumber);
+	void (*user_onSpeedCadence)(float speed, float distance, float cadence);
+	void (*user_onSpeed)(float speed, float distance);
+	void (*user_onCadence)(float cadence);
+	void dispatchPayload(TDCONFIG *cfg, const uint8_t *payload, const int len);
+	static const uint8_t *getAntKey(const uint8_t keyIdx);
+	static uint8_t calcMsgChecksum (const uint8_t *buffer, const uint8_t len);
+	static uint8_t * findStreamSync(uint8_t *stream, const size_t rlen, int *pos);
+	static int msgCheckIntegrity(uint8_t *stream, const int len);
+	static int msgGetLength(uint8_t *stream);
+	int handleMessages(uint8_t *buffer, int tBytes);
+	void sendMessageChannelStatus(TDCONFIG *cfg, const uint32_t channelStatus);
+	void message_channel(const int chan, const int eventId,
+		const uint8_t *payload, const size_t dataLength);
+	void message_response(const int chan, const int msgId,
+		const uint8_t *payload, const size_t dataLength);
+	void message_event(const int channel, const int msgId,
+		const uint8_t *payload, const size_t dataLength);
+	int ResetSystem();
+	int RequestMessage(const int channel, const int message);
+	int SetNetworkKey(const int netNumber, const uint8_t *key);
+	int SetChannelSearchTimeout(const int channel, const int searchTimeout);
+	int SetChannelPeriod(const int channel, const int period);
+	int SetChannelRFFreq(const int channel, const int freq);
+	int SetSearchWaveform(const int channel, const int wave);
+	int OpenChannel(const int channel);
+	int CloseChannel(const int channel);
+	int AssignChannel(const int channel, const int channelType, const int network);
+	int SetChannelId(const int channel, const int deviceNum, const int deviceType,
+		const int transmissionType);
+	int SendBurstTransferPacket(const int channelSeq, const uint8_t *data);
+	int SendBurstTransfer(const int channel, const uint8_t *data, const int nunPackets);
+	int SendBroadcastData(const int channel, const uint8_t *data);
+	int SendAcknowledgedData(const int channel, const uint8_t *data);
+	int SendExtAcknowledgedData(const int channel, const int devNum, const int devType,
+		const int TranType, const uint8_t *data);
+	int SendExtBroadcastData(const int channel, const int devNum, const int devType,
+		const int TranType, const uint8_t *data);
+	int SendExtBurstTransferPacket(const int chanSeq, const int devNum,
+		const int devType, const int TranType, const uint8_t *data);
+	int SendExtBurstTransfer(const int channel, const int devNum, const int devType,
+		const int tranType, const uint8_t *data, const int nunPackets);
+	static void profileSetup_HRM(TDCONFIG *cfg, const uint32_t deviceId);
+	static void profileSetup_SPDCAD(TDCONFIG *cfg, const uint32_t deviceId);
+	static void profileSetup_POWER(TDCONFIG *cfg, const uint32_t deviceId);
+	static void profileSetup_STRIDE(TDCONFIG *cfg, const uint32_t deviceId);
+	static void profileSetup_SPEED(TDCONFIG *cfg, const uint32_t deviceId);
+	static void profileSetup_CADENCE(TDCONFIG *cfg, const uint32_t deviceId);
+	struct {
+		struct {
+			uint8_t bpm;
+			uint8_t sequence;
+			uint16_t time;
+		} previous;
+	} hrm;
+	void payload_HRM(TDCONFIG *cfg, const uint8_t *data, const size_t dataLength);
+	struct {
+		struct {
+			uint16_t cadenceTime;
+			uint16_t cadenceCt;
+			uint16_t speedTime;
+			uint16_t speedCt;
+		} previous;
+		float distance;
+	} spdcad;
+	void payload_SPDCAD(TDCONFIG *cfg, const uint8_t *data, const size_t dataLength);
+	/* struct {
+		struct {
+			uint8_t sequence;
+			uint16_t pedalPowerContribution;
+			uint8_t pedalPower;
+			uint8_t instantCadence;
+			uint16_t sumPower;
+			uint16_t instantPower;
+		} current;
+		struct {
+			uint16_t stub;
+		} previous;
+	} pwr; */
+	void payload_POWER(TDCONFIG *cfg, const uint8_t *data, const size_t dataLength);
+	/* struct {
+		struct {
+			uint16_t speed;
+			uint16_t cadence;
+			uint8_t strides;
+		} current;
+		struct {
+			uint8_t strides;
+			uint16_t speed;
+			uint16_t cadence;
+		} previous;
+	} stride; */
+	void payload_STRIDE(TDCONFIG *cfg, const uint8_t *data, const size_t dataLength);
+	struct {
+		struct {
+			uint16_t speedTime;
+			uint16_t speedCt;
+		} previous;
+		float distance;
+	} spd;
+	void payload_SPEED(TDCONFIG *cfg, const uint8_t *data, const size_t dataLength);
+	struct {
+		struct {
+			uint16_t cadenceTime;
+			uint16_t cadenceCt;
+		} previous;
+	} cad;
+	void payload_CADENCE(TDCONFIG *cfg, const uint8_t *data, const size_t dataLength);
+	uint16_t wheelCircumference; // default is WHEEL_CIRCUMFERENCE (2122cm)
 };
+
 
 #endif

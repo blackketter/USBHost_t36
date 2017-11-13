@@ -29,11 +29,15 @@
 // begin responding to address zero.
 volatile bool USBHub::reset_busy = false;
 
+#define print   USBHost::print_
+#define println USBHost::println_
+
 void USBHub::init()
 {
 	contribute_Devices(mydevices, sizeof(mydevices)/sizeof(Device_t));
 	contribute_Pipes(mypipes, sizeof(mypipes)/sizeof(Pipe_t));
 	contribute_Transfers(mytransfers, sizeof(mytransfers)/sizeof(Transfer_t));
+	contribute_String_Buffers(mystring_bufs, sizeof(mystring_bufs)/sizeof(strbuf_t));
 	driver_ready_for_device(this);
 }
 

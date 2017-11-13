@@ -58,6 +58,8 @@ volatile bool USBHost::enumeration_busy = false;
 static void pipe_set_maxlen(Pipe_t *pipe, uint32_t maxlen);
 static void pipe_set_addr(Pipe_t *pipe, uint32_t addr);
 
+#define print   USBHost::print_
+#define println USBHost::println_
 
 // The main user function to cause internal state to update.  Since we do
 // almost everything with DMA and interrupts, the only work to do here is
@@ -117,6 +119,7 @@ Device_t * USBHost::new_Device(uint32_t speed, uint32_t hub_addr, uint32_t hub_p
 		free_Device(dev);
 		return NULL;
 	}
+	dev->strbuf = allocate_string_buffer();  // try to allocate a string buffer; 
 	dev->control_pipe->callback_function = &enumeration;
 	dev->control_pipe->direction = 1; // 1=IN
 	// Here is where the enumeration process officially begins.
@@ -218,6 +221,7 @@ void USBHost::enumeration(const Transfer_t *transfer)
 			dev->enum_state = 6;
 			return;
 		case 6: // parse Manufacturer string
+			convertStringDescriptorToASCIIString(0, dev, transfer);
 			// TODO: receive the string...
 			if (enumbuf[1]) dev->enum_state = 7;
 			else if (enumbuf[2]) dev->enum_state = 9;
@@ -230,7 +234,7 @@ void USBHost::enumeration(const Transfer_t *transfer)
 			dev->enum_state = 8;
 			return;
 		case 8: // parse Product string
-			// TODO: receive the string...
+			convertStringDescriptorToASCIIString(1, dev, transfer);
 			if (enumbuf[2]) dev->enum_state = 9;
 			else dev->enum_state = 11;
 			break;
@@ -241,7 +245,7 @@ void USBHost::enumeration(const Transfer_t *transfer)
 			dev->enum_state = 10;
 			return;
 		case 10: // parse Serial Number string
-			// TODO: receive the string...
+			convertStringDescriptorToASCIIString(2, dev, transfer);
 			dev->enum_state = 11;
 			break;
 		case 11: // request first 9 bytes of config desc
@@ -285,6 +289,36 @@ void USBHost::enumeration(const Transfer_t *transfer)
 		}
 	}
 }
+
+void  USBHost::convertStringDescriptorToASCIIString(uint8_t string_index, Device_t *dev, const Transfer_t *transfer) {
+	strbuf_t *strbuf = dev->strbuf; 
+	if (!strbuf) return;	// don't have a buffer
+
+	uint8_t *buffer = (uint8_t*)transfer->buffer;
+	uint8_t buf_index = string_index? strbuf->iStrings[string_index]+1 : 0;
+
+	// Try to verify - The first byte should be length and the 2nd byte should be 0x3
+	if (!buffer || (buffer[1] != 0x3)) {
+		return;	// No string so can simply return
+	}
+
+	strbuf->iStrings[string_index] = buf_index;	// remember our starting positio
+	uint8_t count_bytes_returned = buffer[0];
+	if ((buf_index + count_bytes_returned/2) >= DEVICE_STRUCT_STRING_BUF_SIZE)
+		count_bytes_returned = (DEVICE_STRUCT_STRING_BUF_SIZE - buf_index) * 2;
+
+	// Now copy into our storage buffer. 
+	for (uint8_t i = 2; (i < count_bytes_returned) && (buf_index < (DEVICE_STRUCT_STRING_BUF_SIZE -1)); i += 2) {
+		strbuf->buffer[buf_index++] = buffer[i];
+	} 
+	strbuf->buffer[buf_index] = 0;	// null terminate. 
+
+	// Update other indexes to point to null character
+	while (++string_index < 3) {
+		strbuf->iStrings[string_index] = buf_index;	// point to trailing NULL character
+	}
+}
+
 
 void USBHost::claim_drivers(Device_t *dev)
 {
@@ -427,6 +461,9 @@ void USBHost::disconnect_Device(Device_t *dev)
 				prev_dev->next = p->next;
 			}
 			println("removed Device_t from devlist");
+			if (p->strbuf != nullptr ) {
+				free_string_buffer(p->strbuf);
+			}
 			free_Device(p);
 			break;
 		}
