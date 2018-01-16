@@ -672,8 +672,6 @@ public:
 	KeyboardController(USBHost &host) { init(); }
 	KeyboardController(USBHost *host) { init(); }
 	KeyboardController() { init(); }
-	int      available();
-	int      read();
 
 	// Some methods are in both public classes so we need to figure out which one to use
 	operator bool() { return (device != nullptr); }
