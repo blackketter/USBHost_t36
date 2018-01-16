@@ -80,6 +80,7 @@ class USBHost;
 typedef struct Device_struct       Device_t;
 typedef struct Pipe_struct         Pipe_t;
 typedef struct Transfer_struct     Transfer_t;
+typedef enum { CLAIM_NO=0, CLAIM_REPORT, CLAIM_INTERFACE} hidclaim_t;
 
 // All USB device drivers inherit use these classes.
 // Drivers build user-visible functionality on top
@@ -91,6 +92,7 @@ class USBDriverTimer;
 /************************************************/
 /*  Added Defines                               */
 /************************************************/
+// Keyboard special Keys
 #define KEYD_UP    		0xDA
 #define KEYD_DOWN    	0xD9
 #define KEYD_LEFT   	0xD8
@@ -113,6 +115,22 @@ class USBDriverTimer;
 #define KEYD_F10       	0xCB
 #define KEYD_F11       	0xCC
 #define KEYD_F12       	0xCD
+
+
+// USBSerial formats - Lets encode format into bits
+// Bits: 0-4 - Number of data bits 
+// Bits: 5-7 - Parity (0=none, 1=odd, 2 = even)
+// bits: 8-9 - Stop bits. 0=1, 1=2
+
+
+#define USBHOST_SERIAL_7E1 0x047
+#define USBHOST_SERIAL_7O1 0x027
+#define USBHOST_SERIAL_8N1 0x08
+#define USBHOST_SERIAL_8N2 0x108
+#define USBHOST_SERIAL_8E1 0x048
+#define USBHOST_SERIAL_8O1 0x028
+
+
 
 /************************************************/
 /*  Data Structure Definitions                  */
@@ -193,13 +211,16 @@ struct Pipe_struct {
 	void     (*callback_function)(const Transfer_t *);
 	uint16_t periodic_interval;
 	uint16_t periodic_offset;
+	uint16_t bandwidth_interval;
+	uint16_t bandwidth_offset;
+	uint16_t bandwidth_shift;
+	uint8_t  bandwidth_stime;
+	uint8_t  bandwidth_ctime;
 	uint32_t unused1;
 	uint32_t unused2;
 	uint32_t unused3;
 	uint32_t unused4;
 	uint32_t unused5;
-	uint32_t unused6;
-	uint32_t unused7;
 };
 
 // Transfer_t represents a single transaction on the USB bus.
@@ -241,6 +262,7 @@ class USBHost {
 public:
 	static void begin();
 	static void Task();
+	static void countFree(uint32_t &devices, uint32_t &pipes, uint32_t &trans, uint32_t &strs);
 protected:
 	static Pipe_t * new_Pipe(Device_t *dev, uint32_t type, uint32_t endpoint,
 		uint32_t direction, uint32_t maxlen, uint32_t interval=0);
@@ -252,11 +274,12 @@ protected:
 	static void disconnect_Device(Device_t *dev);
 	static void enumeration(const Transfer_t *transfer);
 	static void driver_ready_for_device(USBDriver *driver);
+	static volatile bool enumeration_busy;
+public: // Maybe others may want/need to contribute memory example HID devices may want to add transfers.
 	static void contribute_Devices(Device_t *devices, uint32_t num);
 	static void contribute_Pipes(Pipe_t *pipes, uint32_t num);
 	static void contribute_Transfers(Transfer_t *transfers, uint32_t num);
 	static void contribute_String_Buffers(strbuf_t *strbuf, uint32_t num);
-	static volatile bool enumeration_busy;
 private:
 	static void isr();
 	static void convertStringDescriptorToASCIIString(uint8_t string_index, Device_t *dev, const Transfer_t *transfer);
@@ -362,21 +385,33 @@ protected:
 // All USB device drivers inherit from this base class.
 class USBDriver : public USBHost {
 public:
-	operator bool() { return (device != nullptr); }
-	uint16_t idVendor() { return (device != nullptr) ? device->idVendor : 0; }
-	uint16_t idProduct() { return (device != nullptr) ? device->idProduct : 0; }
-
-	const uint8_t *manufacturer()
-		{  return  ((device == nullptr) || (device->strbuf == nullptr)) ? nullptr : &device->strbuf->buffer[device->strbuf->iStrings[strbuf_t::STR_ID_MAN]]; }
-	const uint8_t *product()
-		{  return  ((device == nullptr) || (device->strbuf == nullptr)) ? nullptr : &device->strbuf->buffer[device->strbuf->iStrings[strbuf_t::STR_ID_PROD]]; }
-	const uint8_t *serialNumber()
-		{  return  ((device == nullptr) || (device->strbuf == nullptr)) ? nullptr : &device->strbuf->buffer[device->strbuf->iStrings[strbuf_t::STR_ID_SERIAL]]; }
-
-	// TODO: user-level functions
-	// check if device is bound/active/online
-	// query vid, pid
-	// query string: manufacturer, product, serial number
+	operator bool() {
+		Device_t *dev = *(Device_t * volatile *)&device;
+		return dev != nullptr;
+	}
+	uint16_t idVendor() {
+		Device_t *dev = *(Device_t * volatile *)&device;
+		return (dev != nullptr) ? dev->idVendor : 0;
+	}
+	uint16_t idProduct() {
+		Device_t *dev = *(Device_t * volatile *)&device;
+		return (dev != nullptr) ? dev->idProduct : 0;
+	}
+	const uint8_t *manufacturer() {
+		Device_t *dev = *(Device_t * volatile *)&device;
+		if (dev == nullptr || dev->strbuf == nullptr) return nullptr;
+		return &dev->strbuf->buffer[dev->strbuf->iStrings[strbuf_t::STR_ID_MAN]];
+	}
+	const uint8_t *product() {
+		Device_t *dev = *(Device_t * volatile *)&device;
+		if (dev == nullptr || dev->strbuf == nullptr) return nullptr;
+		return &dev->strbuf->buffer[dev->strbuf->iStrings[strbuf_t::STR_ID_PROD]];
+	}
+	const uint8_t *serialNumber() {
+		Device_t *dev = *(Device_t * volatile *)&device;
+		if (dev == nullptr || dev->strbuf == nullptr) return nullptr;
+		return &dev->strbuf->buffer[dev->strbuf->iStrings[strbuf_t::STR_ID_SERIAL]];
+	}
 protected:
 	USBDriver() : next(NULL), device(NULL) {}
 	// Check if a driver wishes to claim a device or interface or group
@@ -452,6 +487,8 @@ private:
 
 // Device drivers may inherit from this base class, if they wish to receive
 // HID input data fully decoded by the USBHIDParser driver
+class USBHIDParser;
+
 class USBHIDInput {
 public:
 	operator bool() { return (mydevice != nullptr); }
@@ -465,7 +502,9 @@ public:
 		{  return  ((mydevice == nullptr) || (mydevice->strbuf == nullptr)) ? nullptr : &mydevice->strbuf->buffer[mydevice->strbuf->iStrings[strbuf_t::STR_ID_SERIAL]]; }
 
 private:
-	virtual bool claim_collection(Device_t *dev, uint32_t topusage);
+	virtual hidclaim_t claim_collection(USBHIDParser *driver, Device_t *dev, uint32_t topusage);
+	virtual bool hid_process_in_data(const Transfer_t *transfer) {return false;}
+	virtual bool hid_process_out_data(const Transfer_t *transfer) {return false;}
 	virtual void hid_input_begin(uint32_t topusage, uint32_t type, int lgmin, int lgmax);
 	virtual void hid_input_data(uint32_t usage, int32_t value);
 	virtual void hid_input_end();
@@ -559,10 +598,16 @@ private:
 
 //--------------------------------------------------------------------------
 
+
 class USBHIDParser : public USBDriver {
 public:
 	USBHIDParser(USBHost &host) { init(); }
 	static void driver_ready_for_hid_collection(USBHIDInput *driver);
+	bool sendPacket(const uint8_t *buffer, int cb=-1);
+	void setTXBuffers(uint8_t *buffer1, uint8_t *buffer2, uint8_t cb);
+
+	bool sendControlPacket(uint32_t bmRequestType, uint32_t bRequest,
+			uint32_t wValue, uint32_t wIndex, uint32_t wLength, void *buf);
 protected:
 	enum { TOPUSAGE_LIST_LEN = 4 };
 	enum { USAGE_LIST_LEN = 24 };
@@ -578,6 +623,14 @@ protected:
 	USBHIDInput * find_driver(uint32_t topusage);
 	void parse(uint16_t type_and_report_id, const uint8_t *data, uint32_t len);
 	void init();
+
+	// Atempt for RAWhid to take over processing of data 
+	// 
+	uint16_t inSize(void) {return in_size;}
+	uint16_t outSize(void) {return out_size;}
+
+	uint8_t activeSendMask(void) {return txstate;} 
+
 private:
 	Pipe_t *in_pipe;
 	Pipe_t *out_pipe;
@@ -594,11 +647,15 @@ private:
 	Pipe_t mypipes[3] __attribute__ ((aligned(32)));
 	Transfer_t mytransfers[4] __attribute__ ((aligned(32)));
 	strbuf_t mystring_bufs[1];
+	uint8_t txstate = 0;
+	uint8_t *tx1 = nullptr;
+	uint8_t *tx2 = nullptr;
+	bool hid_driver_claimed_control_ = false;
 };
 
 //--------------------------------------------------------------------------
 
-class KeyboardController : public USBDriver /* , public USBHIDInput */ {
+class KeyboardController : public USBDriver , public USBHIDInput  {
 public:
 typedef union {
    struct {
@@ -617,6 +674,10 @@ public:
 	KeyboardController() { init(); }
 	int      available();
 	int      read();
+
+	// Some methods are in both public classes so we need to figure out which one to use
+	operator bool() { return (device != nullptr); }
+	// Main boot keyboard functions. 
 	uint16_t getKey() { return keyCode; }
 	uint8_t  getModifiers() { return modifiers; }
 	uint8_t  getOemKey() { return keyOEM; }
@@ -631,6 +692,13 @@ public:
 	void	 numLock(bool f);
 	void     capsLock(bool f);
 	void	 scrollLock(bool f);
+
+	// Added for extras information.
+	void     attachExtrasPress(void (*f)(uint32_t top, uint16_t code)) { extrasKeyPressedFunction = f; }
+	void     attachExtrasRelease(void (*f)(uint32_t top, uint16_t code)) { extrasKeyReleasedFunction = f; }
+	enum {MAX_KEYS_DOWN=4};
+
+
 protected:
 	virtual bool claim(Device_t *device, int type, const uint8_t *descriptors, uint32_t len);
 	virtual void control(const Transfer_t *transfer);
@@ -638,6 +706,14 @@ protected:
 	static void callback(const Transfer_t *transfer);
 	void new_data(const Transfer_t *transfer);
 	void init();
+
+protected:	// HID functions for extra keyboard data. 
+	virtual hidclaim_t claim_collection(USBHIDParser *driver, Device_t *dev, uint32_t topusage);
+	virtual void hid_input_begin(uint32_t topusage, uint32_t type, int lgmin, int lgmax);
+	virtual void hid_input_data(uint32_t usage, int32_t value);
+	virtual void hid_input_end();
+	virtual void disconnect_collection(Device_t *dev);
+
 private:
 	void update();
 	uint16_t convert_to_unicode(uint32_t mod, uint32_t key);
@@ -653,43 +729,22 @@ private:
 	uint8_t keyOEM;
 	uint8_t prev_report[8];
 	KBDLeds_t leds_ = {0};
-	bool update_leds_ = false;
-	bool processing_new_data_ = false;
 	Pipe_t mypipes[2] __attribute__ ((aligned(32)));
 	Transfer_t mytransfers[4] __attribute__ ((aligned(32)));
 	strbuf_t mystring_bufs[1];
-};
 
-//--------------------------------------------------------------------------
-
-class KeyboardHIDExtrasController : public USBHIDInput {
-public:
-	KeyboardHIDExtrasController(USBHost &host) { USBHIDParser::driver_ready_for_hid_collection(this); }
-	void	clear() { event_ = false;}
-	bool	available() { return event_; }
-	void     attachPress(void (*f)(uint32_t top, uint16_t code)) { keyPressedFunction = f; }
-	void     attachRelease(void (*f)(uint32_t top, uint16_t code)) { keyReleasedFunction = f; }
-	enum {MAX_KEYS_DOWN=4};
-//	uint32_t buttons() { return buttons_; }
-protected:
-	virtual bool claim_collection(Device_t *dev, uint32_t topusage);
-	virtual void hid_input_begin(uint32_t topusage, uint32_t type, int lgmin, int lgmax);
-	virtual void hid_input_data(uint32_t usage, int32_t value);
-	virtual void hid_input_end();
-	virtual void disconnect_collection(Device_t *dev);
-private:
-	void (*keyPressedFunction)(uint32_t top, uint16_t code);
-	void (*keyReleasedFunction)(uint32_t top, uint16_t code);
+	// Added to process secondary HID data. 
+	void (*extrasKeyPressedFunction)(uint32_t top, uint16_t code);
+	void (*extrasKeyReleasedFunction)(uint32_t top, uint16_t code);
 	uint32_t topusage_ = 0;					// What top report am I processing?
 	uint8_t collections_claimed_ = 0;
-	volatile bool event_ = false;
 	volatile bool hid_input_begin_ = false;
 	volatile bool hid_input_data_ = false; 	// did we receive any valid data with report?
 	uint8_t count_keys_down_ = 0;
 	uint16_t keys_down[MAX_KEYS_DOWN];
+
 };
 
-//--------------------------------------------------------------------------
 
 class MouseController : public USBHIDInput {
 public:
@@ -702,7 +757,7 @@ public:
 	int     getWheel() { return wheel; }
 	int     getWheelH() { return wheelH; }
 protected:
-	virtual bool claim_collection(Device_t *dev, uint32_t topusage);
+	virtual hidclaim_t claim_collection(USBHIDParser *driver, Device_t *dev, uint32_t topusage);
 	virtual void hid_input_begin(uint32_t topusage, uint32_t type, int lgmin, int lgmax);
 	virtual void hid_input_data(uint32_t usage, int32_t value);
 	virtual void hid_input_end();
@@ -720,38 +775,264 @@ private:
 
 //--------------------------------------------------------------------------
 
-class JoystickController : public USBHIDInput {
+class JoystickController : public USBDriver, public USBHIDInput {
 public:
-	JoystickController(USBHost &host) { USBHIDParser::driver_ready_for_hid_collection(this); }
+	JoystickController(USBHost &host) { init(); }
+
+	uint16_t idVendor();
+	uint16_t idProduct();
+
+	const uint8_t *manufacturer();
+	const uint8_t *product();
+	const uint8_t *serialNumber();
+	operator bool() { return ((device != nullptr) || (mydevice != nullptr)); }	// override as in both USBDriver and in USBHIDInput
+
 	bool    available() { return joystickEvent; }
 	void    joystickDataClear();
 	uint32_t getButtons() { return buttons; }
-	int	getAxis(uint32_t index) { return (index < (sizeof(axis)/sizeof(axis[0]))) ? axis[index] : 0; }
+	int		getAxis(uint32_t index) { return (index < (sizeof(axis)/sizeof(axis[0]))) ? axis[index] : 0; }
+	uint64_t axisMask() {return axis_mask_;}
+	uint64_t axisChangedMask() { return axis_changed_mask_;}
+	uint64_t axisChangeNotifyMask() {return axis_change_notify_mask_;}
+	void 	 axisChangeNotifyMask(uint64_t notify_mask) {axis_change_notify_mask_ = notify_mask;}
+
+	// set functions functionality depends on underlying joystick. 
+    bool setRumble(uint8_t lValue, uint8_t rValue, uint8_t timeout=0xff);
+    // setLEDs on PS4(RGB), PS3 simple LED setting (only uses lr)
+    bool setLEDs(uint8_t lr, uint8_t lg=0, uint8_t lb=0);  // sets Leds, 
+	enum { STANDARD_AXIS_COUNT = 10, ADDITIONAL_AXIS_COUNT = 54, TOTAL_AXIS_COUNT = (STANDARD_AXIS_COUNT+ADDITIONAL_AXIS_COUNT) };
+	typedef enum { UNKNOWN=0, PS3, PS4, XBOXONE} joytype_t;
+	joytype_t joystickType = UNKNOWN;
 protected:
-	virtual bool claim_collection(Device_t *dev, uint32_t topusage);
+	// From USBDriver
+	virtual bool claim(Device_t *device, int type, const uint8_t *descriptors, uint32_t len);
+	virtual void control(const Transfer_t *transfer);
+	virtual void disconnect();
+
+	// From USBHIDInput
+	virtual hidclaim_t claim_collection(USBHIDParser *driver, Device_t *dev, uint32_t topusage);
 	virtual void hid_input_begin(uint32_t topusage, uint32_t type, int lgmin, int lgmax);
 	virtual void hid_input_data(uint32_t usage, int32_t value);
 	virtual void hid_input_end();
 	virtual void disconnect_collection(Device_t *dev);
+	virtual bool hid_process_out_data(const Transfer_t *transfer);
 private:
-	uint8_t collections_claimed = 0;
+
+	// Class specific
+	void init();
+	USBHIDParser *driver_ = nullptr;
+	joytype_t mapVIDPIDtoJoystickType(uint16_t idVendor, uint16_t idProduct, bool exclude_hid_devices);
+	bool transmitPS4UserFeedbackMsg();
+	bool transmitPS3UserFeedbackMsg();
+
 	bool anychange = false;
 	volatile bool joystickEvent = false;
 	uint32_t buttons = 0;
-	int16_t axis[10] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+	int axis[TOTAL_AXIS_COUNT] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+	uint64_t axis_mask_ = 0;	// which axis have valid data
+	uint64_t axis_changed_mask_ = 0;
+	uint64_t axis_change_notify_mask_ = 0x3ff;	// assume the low 10 values only. 
+
+	uint16_t additional_axis_usage_page_ = 0;
+	uint16_t additional_axis_usage_start_ = 0;
+	uint16_t additional_axis_usage_count_ = 0;
+
+	// State values to output to Joystick.
+	uint8_t rumble_lValue_ = 0; 
+	uint8_t rumble_rValue_ = 0;
+	uint8_t rumble_timeout_ = 0;
+	uint8_t leds_[3] = {0,0,0};
+
+
+	// Used by HID code
+	uint8_t collections_claimed = 0;
+
+	// Used by USBDriver code
+	static void rx_callback(const Transfer_t *transfer);
+	static void tx_callback(const Transfer_t *transfer);
+	void rx_data(const Transfer_t *transfer);
+	void tx_data(const Transfer_t *transfer);
+
+	Pipe_t mypipes[3] __attribute__ ((aligned(32)));
+	Transfer_t mytransfers[7] __attribute__ ((aligned(32)));
+	strbuf_t mystring_bufs[1];
+
+	uint16_t 		rx_size_ = 0;
+	uint16_t 		tx_size_ = 0;
+	Pipe_t 			*rxpipe_;
+	Pipe_t 			*txpipe_;
+	uint8_t 		rxbuf_[64];	// receive circular buffer
+	uint8_t			txbuf_[64];		// buffer to use to send commands to joystick 
+	// Mapping table to say which devices we handle
+	typedef struct {
+		uint16_t 	idVendor;
+		uint16_t 	idProduct;
+		joytype_t	joyType;
+		bool 		hidDevice;
+	} product_vendor_mapping_t;
+	static product_vendor_mapping_t pid_vid_mapping[];
+
 };
+
 
 //--------------------------------------------------------------------------
 
 class MIDIDevice : public USBDriver {
 public:
-	enum { SYSEX_MAX_LEN = 60 };
+	enum { SYSEX_MAX_LEN = 290 };
+
+	// Message type names for compatibility with Arduino MIDI library 4.3.1
+	enum MidiType {
+		InvalidType           = 0x00, // For notifying errors
+		NoteOff               = 0x80, // Note Off
+		NoteOn                = 0x90, // Note On
+		AfterTouchPoly        = 0xA0, // Polyphonic AfterTouch
+		ControlChange         = 0xB0, // Control Change / Channel Mode
+		ProgramChange         = 0xC0, // Program Change
+		AfterTouchChannel     = 0xD0, // Channel (monophonic) AfterTouch
+		PitchBend             = 0xE0, // Pitch Bend
+		SystemExclusive       = 0xF0, // System Exclusive
+		TimeCodeQuarterFrame  = 0xF1, // System Common - MIDI Time Code Quarter Frame
+		SongPosition          = 0xF2, // System Common - Song Position Pointer
+		SongSelect            = 0xF3, // System Common - Song Select
+		TuneRequest           = 0xF6, // System Common - Tune Request
+		Clock                 = 0xF8, // System Real Time - Timing Clock
+		Start                 = 0xFA, // System Real Time - Start
+		Continue              = 0xFB, // System Real Time - Continue
+		Stop                  = 0xFC, // System Real Time - Stop
+		ActiveSensing         = 0xFE, // System Real Time - Active Sensing
+		SystemReset           = 0xFF, // System Real Time - System Reset
+	};
 	MIDIDevice(USBHost &host) { init(); }
 	MIDIDevice(USBHost *host) { init(); }
-	bool read(uint8_t channel=0, uint8_t cable=0);
+
+	void sendNoteOff(uint8_t note, uint8_t velocity, uint8_t channel, uint8_t cable=0) {
+		send(0x80, note, velocity, channel, cable);
+	}
+	void sendNoteOn(uint8_t note, uint8_t velocity, uint8_t channel, uint8_t cable=0) {
+		send(0x90, note, velocity, channel, cable);
+	}
+	void sendPolyPressure(uint8_t note, uint8_t pressure, uint8_t channel, uint8_t cable=0) {
+		send(0xA0, note, pressure, channel, cable);
+	}
+	void sendAfterTouchPoly(uint8_t note, uint8_t pressure, uint8_t channel, uint8_t cable=0) {
+		send(0xA0, note, pressure, channel, cable);
+	}
+	void sendControlChange(uint8_t control, uint8_t value, uint8_t channel, uint8_t cable=0) {
+		send(0xB0, control, value, channel, cable);
+	}
+	void sendProgramChange(uint8_t program, uint8_t channel, uint8_t cable=0) {
+		send(0xC0, program, 0, channel, cable);
+	}
+	void sendAfterTouch(uint8_t pressure, uint8_t channel, uint8_t cable=0) {
+		send(0xD0, pressure, 0, channel, cable);
+	}
+	void sendPitchBend(int value, uint8_t channel, uint8_t cable=0) {
+		if (value < -8192) {
+			value = -8192;
+		} else if (value > 8191) {
+			value = 8191;
+		}
+		value += 8192;
+		send(0xE0, value, value >> 7, channel, cable);
+	}
+	void sendSysEx(uint32_t length, const uint8_t *data, bool hasTerm=false, uint8_t cable=0) {
+		//if (cable >= MIDI_NUM_CABLES) return;
+		if (hasTerm) {
+			send_sysex_buffer_has_term(data, length, cable);
+		} else {
+			send_sysex_add_term_bytes(data, length, cable);
+		}
+	}
+	void sendRealTime(uint8_t type, uint8_t cable=0) {
+		switch (type) {
+			case 0xF8: // Clock
+			case 0xFA: // Start
+			case 0xFB: // Continue
+			case 0xFC: // Stop
+			case 0xFE: // ActiveSensing
+			case 0xFF: // SystemReset
+				send(type, 0, 0, 0, cable);
+				break;
+			default: // Invalid Real Time marker
+				break;
+		}
+	}
+	void sendTimeCodeQuarterFrame(uint8_t type, uint8_t value, uint8_t cable=0) {
+		send(0xF1, ((type & 0x07) << 4) | (value & 0x0F), 0, 0, cable);
+	}
+	void sendSongPosition(uint16_t beats, uint8_t cable=0) {
+		send(0xF2, beats, beats >> 7, 0, cable);
+	}
+	void sendSongSelect(uint8_t song, uint8_t cable=0) {
+		send(0xF3, song, 0, 0, cable);
+	}
+	void sendTuneRequest(uint8_t cable=0) {
+		send(0xF6, 0, 0, 0, cable);
+	}
+	void beginRpn(uint16_t number, uint8_t channel, uint8_t cable=0) {
+		sendControlChange(101, number >> 7, channel, cable);
+		sendControlChange(100, number, channel, cable);
+	}
+	void sendRpnValue(uint16_t value, uint8_t channel, uint8_t cable=0) {
+		sendControlChange(6, value >> 7, channel, cable);
+		sendControlChange(38, value, channel, cable);
+	}
+	void sendRpnIncrement(uint8_t amount, uint8_t channel, uint8_t cable=0) {
+		sendControlChange(96, amount, channel, cable);
+	}
+	void sendRpnDecrement(uint8_t amount, uint8_t channel, uint8_t cable=0) {
+		sendControlChange(97, amount, channel, cable);
+	}
+	void endRpn(uint8_t channel, uint8_t cable=0) {
+		sendControlChange(101, 0x7F, channel, cable);
+		sendControlChange(100, 0x7F, channel, cable);
+	}
+	void beginNrpn(uint16_t number, uint8_t channel, uint8_t cable=0) {
+		sendControlChange(99, number >> 7, channel, cable);
+		sendControlChange(98, number, channel, cable);
+	}
+	void sendNrpnValue(uint16_t value, uint8_t channel, uint8_t cable=0) {
+		sendControlChange(6, value >> 7, channel, cable);
+		sendControlChange(38, value, channel, cable);
+	}
+	void sendNrpnIncrement(uint8_t amount, uint8_t channel, uint8_t cable=0) {
+		sendControlChange(96, amount, channel, cable);
+	}
+	void sendNrpnDecrement(uint8_t amount, uint8_t channel, uint8_t cable=0) {
+		sendControlChange(97, amount, channel, cable);
+	}
+	void endNrpn(uint8_t channel, uint8_t cable=0) {
+		sendControlChange(99, 0x7F, channel, cable);
+		sendControlChange(98, 0x7F, channel, cable);
+	}
+	void send(uint8_t type, uint8_t data1, uint8_t data2, uint8_t channel, uint8_t cable=0) {
+		//if (cable >= MIDI_NUM_CABLES) return;
+		if (type < 0xF0) {
+			if (type < 0x80) return;
+			type &= 0xF0;
+			write_packed((type << 8) | (type >> 4) | ((cable & 0x0F) << 4)
+			  | (((channel - 1) & 0x0F) << 8) | ((data1 & 0x7F) << 16)
+			  | ((data2 & 0x7F) << 24));
+		} else if (type >= 0xF8 || type == 0xF6) {
+			write_packed((type << 8) | 0x0F | ((cable & 0x0F) << 4));
+		} else if (type == 0xF1 || type == 0xF3) {
+			write_packed((type << 8) | 0x02 | ((cable & 0x0F) << 4)
+			  | ((data1 & 0x7F) << 16));
+		} else if (type == 0xF2) {
+			write_packed((type << 8) | 0x03 | ((cable & 0x0F) << 4)
+			  | ((data1 & 0x7F) << 16) | ((data2 & 0x7F) << 24));
+		}
+	}
+	void send_now(void) __attribute__((always_inline)) {
+	}
+	bool read(uint8_t channel=0);
 	uint8_t getType(void) {
 		return msg_type;
 	};
+	uint8_t getCable(void) {
+		return msg_cable;
+	}
 	uint8_t getChannel(void) {
 		return msg_channel;
 	};
@@ -761,85 +1042,103 @@ public:
 	uint8_t getData2(void) {
 		return msg_data2;
 	};
-	void setHandleNoteOff(void (*f)(uint8_t channel, uint8_t note, uint8_t velocity)) {
-		handleNoteOff = f;
-	};
-	void setHandleNoteOn(void (*f)(uint8_t channel, uint8_t note, uint8_t velocity)) {
-		handleNoteOn = f;
-	};
-	void setHandleVelocityChange(void (*f)(uint8_t channel, uint8_t note, uint8_t velocity)) {
-		handleVelocityChange = f;
-	};
-	void setHandleControlChange(void (*f)(uint8_t channel, uint8_t control, uint8_t value)) {
-		handleControlChange = f;
-	};
-	void setHandleProgramChange(void (*f)(uint8_t channel, uint8_t program)) {
-		handleProgramChange = f;
-	};
-	void setHandleAfterTouch(void (*f)(uint8_t channel, uint8_t pressure)) {
-		handleAfterTouch = f;
-	};
-	void setHandlePitchChange(void (*f)(uint8_t channel, int pitch)) {
-		handlePitchChange = f;
-	};
-	void setHandleSysEx(void (*f)(const uint8_t *data, uint16_t length, bool complete)) {
-		handleSysEx = (void (*)(const uint8_t *, uint16_t, uint8_t))f;
+	uint8_t * getSysExArray(void) {
+		return msg_sysex;
 	}
-	void setHandleRealTimeSystem(void (*f)(uint8_t realtimebyte)) {
-		handleRealTimeSystem = f;
-	};
-	void setHandleTimeCodeQuarterFrame(void (*f)(uint16_t data)) {
-		handleTimeCodeQuarterFrame = f;
-	};
-	void sendNoteOff(uint32_t note, uint32_t velocity, uint32_t channel) {
-		write_packed(0x8008 | (((channel - 1) & 0x0F) << 8)
-		 | ((note & 0x7F) << 16) | ((velocity & 0x7F) << 24));
+	uint16_t getSysExArrayLength(void) {
+		return msg_data2 << 8 | msg_data1;
 	}
-	void sendNoteOn(uint32_t note, uint32_t velocity, uint32_t channel) {
-		write_packed(0x9009 | (((channel - 1) & 0x0F) << 8)
-		 | ((note & 0x7F) << 16) | ((velocity & 0x7F) << 24));
+	void setHandleNoteOff(void (*fptr)(uint8_t channel, uint8_t note, uint8_t velocity)) {
+		// type: 0x80  NoteOff
+		handleNoteOff = fptr;
 	}
-	void sendPolyPressure(uint32_t note, uint32_t pressure, uint32_t channel) {
-		write_packed(0xA00A | (((channel - 1) & 0x0F) << 8)
-		 | ((note & 0x7F) << 16) | ((pressure & 0x7F) << 24));
+	void setHandleNoteOn(void (*fptr)(uint8_t channel, uint8_t note, uint8_t velocity)) {
+		// type: 0x90  NoteOn
+		handleNoteOn = fptr;
 	}
-	void sendControlChange(uint32_t control, uint32_t value, uint32_t channel) {
-		write_packed(0xB00B | (((channel - 1) & 0x0F) << 8)
-		 | ((control & 0x7F) << 16) | ((value & 0x7F) << 24));
+	void setHandleVelocityChange(void (*fptr)(uint8_t channel, uint8_t note, uint8_t velocity)) {
+		// type: 0xA0  AfterTouchPoly
+		handleVelocityChange = fptr;
 	}
-	void sendProgramChange(uint32_t program, uint32_t channel) {
-		write_packed(0xC00C | (((channel - 1) & 0x0F) << 8)
-		 | ((program & 0x7F) << 16));
+	void setHandleAfterTouchPoly(void (*fptr)(uint8_t channel, uint8_t note, uint8_t pressure)) {
+		// type: 0xA0  AfterTouchPoly
+		handleVelocityChange = fptr;
 	}
-	void sendAfterTouch(uint32_t pressure, uint32_t channel) {
-		write_packed(0xD00D | (((channel - 1) & 0x0F) << 8)
-		 | ((pressure & 0x7F) << 16));
+	void setHandleControlChange(void (*fptr)(uint8_t channel, uint8_t control, uint8_t value)) {
+		// type: 0xB0  ControlChange
+		handleControlChange = fptr;
 	}
-	void sendPitchBend(uint32_t value, uint32_t channel) {
-		write_packed(0xE00E | (((channel - 1) & 0x0F) << 8)
-		 | ((value & 0x7F) << 16) | ((value & 0x3F80) << 17));
+	void setHandleProgramChange(void (*fptr)(uint8_t channel, uint8_t program)) {
+		// type: 0xC0  ProgramChange
+		handleProgramChange = fptr;
 	}
-	void sendSysEx(uint32_t length, const void *data);
-	void sendRealTime(uint32_t type) {
-		switch (type) {
-			case 0xF8: // Clock
-			case 0xFA: // Start
-			case 0xFC: // Stop
-			case 0xFB: // Continue
-			case 0xFE: // ActiveSensing
-			case 0xFF: // SystemReset
-				write_packed((type << 8) | 0x0F);
-			break;
-				default: // Invalid Real Time marker
-			break;
-		}
+	void setHandleAfterTouch(void (*fptr)(uint8_t channel, uint8_t pressure)) {
+		// type: 0xD0  AfterTouchChannel
+		handleAfterTouch = fptr;
 	}
-	void sendTimeCodeQuarterFrame(uint32_t type, uint32_t value) {
-		uint32_t data = ( ((type & 0x07) << 4) | (value & 0x0F) );
-		sendTimeCodeQuarterFrame(data);
+	void setHandleAfterTouchChannel(void (*fptr)(uint8_t channel, uint8_t pressure)) {
+		// type: 0xD0  AfterTouchChannel
+		handleAfterTouch = fptr;
 	}
-	void sendTimeCodeQuarterFrame(uint32_t data) {
-		write_packed(0xF108 | ((data & 0x7F) << 16));
+	void setHandlePitchChange(void (*fptr)(uint8_t channel, int pitch)) {
+		// type: 0xE0  PitchBend
+		handlePitchChange = fptr;
+	}
+	void setHandleSysEx(void (*fptr)(const uint8_t *data, uint16_t length, bool complete)) {
+		// type: 0xF0  SystemExclusive - multiple calls for message bigger than buffer
+		handleSysExPartial = (void (*)(const uint8_t *, uint16_t, uint8_t))fptr;
+	}
+	void setHandleSystemExclusive(void (*fptr)(const uint8_t *data, uint16_t length, bool complete)) {
+		// type: 0xF0  SystemExclusive - multiple calls for message bigger than buffer
+		handleSysExPartial = (void (*)(const uint8_t *, uint16_t, uint8_t))fptr;
+	}
+	void setHandleSystemExclusive(void (*fptr)(uint8_t *data, unsigned int size)) {
+		// type: 0xF0  SystemExclusive - single call, message larger than buffer is truncated
+		handleSysExComplete = fptr;
+	}
+	void setHandleTimeCodeQuarterFrame(void (*fptr)(uint8_t data)) {
+		// type: 0xF1  TimeCodeQuarterFrame
+		handleTimeCodeQuarterFrame = fptr;
+	}
+	void setHandleSongPosition(void (*fptr)(uint16_t beats)) {
+		// type: 0xF2  SongPosition
+		handleSongPosition = fptr;
+	}
+	void setHandleSongSelect(void (*fptr)(uint8_t songnumber)) {
+		// type: 0xF3  SongSelect
+		handleSongSelect = fptr;
+	}
+	void setHandleTuneRequest(void (*fptr)(void)) {
+		// type: 0xF6  TuneRequest
+		handleTuneRequest = fptr;
+	}
+	void setHandleClock(void (*fptr)(void)) {
+		// type: 0xF8  Clock
+		handleClock = fptr;
+	}
+	void setHandleStart(void (*fptr)(void)) {
+		// type: 0xFA  Start
+		handleStart = fptr;
+	}
+	void setHandleContinue(void (*fptr)(void)) {
+		// type: 0xFB  Continue
+		handleContinue = fptr;
+	}
+	void setHandleStop(void (*fptr)(void)) {
+		// type: 0xFC  Stop
+		handleStop = fptr;
+	}
+	void setHandleActiveSensing(void (*fptr)(void)) {
+		// type: 0xFE  ActiveSensing
+		handleActiveSensing = fptr;
+	}
+	void setHandleSystemReset(void (*fptr)(void)) {
+		// type: 0xFF  SystemReset
+		handleSystemReset = fptr;
+	}
+	void setHandleRealTimeSystem(void (*fptr)(uint8_t realtimebyte)) {
+		// type: 0xF8-0xFF - if more specific handler not configured
+		handleRealTimeSystem = fptr;
 	}
 protected:
 	virtual bool claim(Device_t *device, int type, const uint8_t *descriptors, uint32_t len);
@@ -850,6 +1149,8 @@ protected:
 	void tx_data(const Transfer_t *transfer);
 	void init();
 	void write_packed(uint32_t data);
+	void send_sysex_buffer_has_term(const uint8_t *data, uint32_t length, uint8_t cable);
+	void send_sysex_add_term_bytes(const uint8_t *data, uint32_t length, uint8_t cable);
 	void sysex_byte(uint8_t b);
 private:
 	Pipe_t *rxpipe;
@@ -857,21 +1158,27 @@ private:
 	enum { MAX_PACKET_SIZE = 64 };
 	enum { RX_QUEUE_SIZE = 80 }; // must be more than MAX_PACKET_SIZE/4
 	uint32_t rx_buffer[MAX_PACKET_SIZE/4];
-	uint32_t tx_buffer[MAX_PACKET_SIZE/4];
+	uint32_t tx_buffer1[MAX_PACKET_SIZE/4];
+	uint32_t tx_buffer2[MAX_PACKET_SIZE/4];
 	uint16_t rx_size;
 	uint16_t tx_size;
 	uint32_t rx_queue[RX_QUEUE_SIZE];
 	bool rx_packet_queued;
 	uint16_t rx_head;
 	uint16_t rx_tail;
+	volatile uint8_t tx1_count;
+	volatile uint8_t tx2_count;
 	uint8_t rx_ep;
 	uint8_t tx_ep;
+	uint8_t rx_ep_type;
+	uint8_t tx_ep_type;
+	uint8_t msg_cable;
 	uint8_t msg_channel;
 	uint8_t msg_type;
 	uint8_t msg_data1;
 	uint8_t msg_data2;
 	uint8_t msg_sysex[SYSEX_MAX_LEN];
-	uint8_t msg_sysex_len;
+	uint16_t msg_sysex_len;
 	void (*handleNoteOff)(uint8_t ch, uint8_t note, uint8_t vel);
 	void (*handleNoteOn)(uint8_t ch, uint8_t note, uint8_t vel);
 	void (*handleVelocityChange)(uint8_t ch, uint8_t note, uint8_t vel);
@@ -879,9 +1186,19 @@ private:
 	void (*handleProgramChange)(uint8_t ch, uint8_t program);
 	void (*handleAfterTouch)(uint8_t ch, uint8_t pressure);
 	void (*handlePitchChange)(uint8_t ch, int pitch);
-	void (*handleSysEx)(const uint8_t *data, uint16_t length, uint8_t complete);
+	void (*handleSysExPartial)(const uint8_t *data, uint16_t length, uint8_t complete);
+	void (*handleSysExComplete)(uint8_t *data, unsigned int size);
+	void (*handleTimeCodeQuarterFrame)(uint8_t data);
+	void (*handleSongPosition)(uint16_t beats);
+	void (*handleSongSelect)(uint8_t songnumber);
+	void (*handleTuneRequest)(void);
+	void (*handleClock)(void);
+	void (*handleStart)(void);
+	void (*handleContinue)(void);
+	void (*handleStop)(void);
+	void (*handleActiveSensing)(void);
+	void (*handleSystemReset)(void);
 	void (*handleRealTimeSystem)(uint8_t rtb);
-	void (*handleTimeCodeQuarterFrame)(uint16_t data);
 	Pipe_t mypipes[3] __attribute__ ((aligned(32)));
 	Transfer_t mytransfers[7] __attribute__ ((aligned(32)));
 	strbuf_t mystring_bufs[1];
@@ -890,17 +1207,23 @@ private:
 //--------------------------------------------------------------------------
 
 class USBSerial: public USBDriver, public Stream {
-public:
+	public:
+
+
 	// FIXME: need different USBSerial, with bigger buffers for 480 Mbit & faster speed
 	enum { BUFFER_SIZE = 648 }; // must hold at least 6 max size packets, plus 2 extra bytes
+	enum { DEFAULT_WRITE_TIMEOUT = 3500};
 	USBSerial(USBHost &host) : txtimer(this) { init(); }
-	void begin(uint32_t baud, uint32_t format=0);
+	void begin(uint32_t baud, uint32_t format=USBHOST_SERIAL_8N1);
 	void end(void);
+	uint32_t writeTimeout() {return write_timeout_;}
+	void writeTimeOut(uint32_t write_timeout) {write_timeout_ = write_timeout;} // Will not impact current ones.
 	virtual int available(void);
 	virtual int peek(void);
 	virtual int read(void);
 	virtual int availableForWrite();
 	virtual size_t write(uint8_t c);
+	virtual void flush(void);
 
 	using Print::write;
 protected:
@@ -917,6 +1240,7 @@ private:
 	void init();
 	static bool check_rxtx_ep(uint32_t &rxep, uint32_t &txep);
 	bool init_buffers(uint32_t rsize, uint32_t tsize);
+	void ch341_setBaud(uint8_t byte_index);
 private:
 	Pipe_t mypipes[3] __attribute__ ((aligned(32)));
 	Transfer_t mytransfers[7] __attribute__ ((aligned(32)));
@@ -924,8 +1248,10 @@ private:
 	USBDriverTimer txtimer;
 	uint32_t bigbuffer[(BUFFER_SIZE+3)/4];
 	setup_t setup;
-	uint8_t setupdata[8];
+	uint8_t setupdata[16]; // 
 	uint32_t baudrate;
+	uint32_t format_;
+	uint32_t write_timeout_ = DEFAULT_WRITE_TIMEOUT;
 	Pipe_t *rxpipe;
 	Pipe_t *txpipe;
 	uint8_t *rx1;	// location for first incoming packet
@@ -948,7 +1274,16 @@ private:
 	uint8_t pl2303_v2;
 	uint8_t interface;
 	bool control_queued;
-	enum { CDCACM, FTDI, PL2303, CH341 } sertype;
+	typedef enum { UNKNOWN=0, CDCACM, FTDI, PL2303, CH341, CP210X } sertype_t;
+	sertype_t sertype;
+
+	typedef struct {
+		uint16_t 	idVendor;
+		uint16_t 	idProduct;
+		sertype_t 	sertype;
+	} product_vendor_mapping_t;
+	static product_vendor_mapping_t pid_vid_mapping[];
+
 };
 
 //--------------------------------------------------------------------------
@@ -1172,5 +1507,35 @@ private:
 	uint16_t wheelCircumference; // default is WHEEL_CIRCUMFERENCE (2122cm)
 };
 
+//--------------------------------------------------------------------------
+
+class RawHIDController : public USBHIDInput {
+public:
+	RawHIDController(USBHost &host, uint32_t usage = 0) : fixed_usage_(usage) { init(); }
+	uint32_t usage(void) {return usage_;}
+	void attachReceive(bool (*f)(uint32_t usage, const uint8_t *data, uint32_t len)) {receiveCB = f;}
+	bool sendPacket(const uint8_t *buffer);
+protected:
+	virtual hidclaim_t claim_collection(USBHIDParser *driver, Device_t *dev, uint32_t topusage);
+	virtual bool hid_process_in_data(const Transfer_t *transfer);
+	virtual bool hid_process_out_data(const Transfer_t *transfer);
+	virtual void hid_input_begin(uint32_t topusage, uint32_t type, int lgmin, int lgmax);
+	virtual void hid_input_data(uint32_t usage, int32_t value);
+	virtual void hid_input_end();
+	virtual void disconnect_collection(Device_t *dev);
+private:
+	void init();
+	USBHIDParser *driver_;
+	enum { MAX_PACKET_SIZE = 64 };
+	bool (*receiveCB)(uint32_t usage, const uint8_t *data, uint32_t len) = nullptr;
+	uint8_t collections_claimed = 0;
+	//volatile bool hid_input_begin_ = false;
+	uint32_t fixed_usage_;
+	uint32_t usage_ = 0;
+
+	// See if we can contribute transfers
+	Transfer_t mytransfers[2] __attribute__ ((aligned(32)));
+
+};
 
 #endif

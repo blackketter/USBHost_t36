@@ -39,11 +39,23 @@ void MIDIDevice::init()
 	handleProgramChange = NULL;
 	handleAfterTouch = NULL;
 	handlePitchChange = NULL;
-	handleSysEx = NULL;
-	handleRealTimeSystem = NULL;
+	handleSysExPartial = NULL;
+	handleSysExComplete = NULL;
 	handleTimeCodeQuarterFrame = NULL;
+	handleSongPosition = NULL;
+	handleSongSelect = NULL;
+	handleTuneRequest = NULL;
+	handleClock = NULL;
+	handleStart = NULL;
+	handleContinue = NULL;
+	handleStop = NULL;
+	handleActiveSensing = NULL;
+	handleSystemReset = NULL;
+	handleRealTimeSystem = NULL;
 	rx_head = 0;
 	rx_tail = 0;
+	rxpipe = NULL;
+	txpipe = NULL;
 	driver_ready_for_device(this);
 }
 
@@ -73,7 +85,6 @@ void MIDIDevice::init()
 
 bool MIDIDevice::claim(Device_t *dev, int type, const uint8_t *descriptors, uint32_t len)
 {
-
 	// only claim at interface level
 	if (type != 1) return false;
 	println("MIDIDevice claim this=", (uint32_t)this, HEX);
@@ -97,7 +108,8 @@ bool MIDIDevice::claim(Device_t *dev, int type, const uint8_t *descriptors, uint
 		if (len < 4) return false; // all audio desc are at least 4 bytes
 		if (p + len > end) return false; // reject if beyond end of data
 		uint32_t type = p[1];
-		//println("type: ", type);
+		print("type: ", type);
+		println(", len: ", len);
 		if (type == 4 || type == 11) break; // interface or IAD, not for us
 		if (type == 0x24) {  // 0x24 = Audio CS_INTERFACE, audio 1.0, page 99
 			uint32_t subtype = p[2];
@@ -120,13 +132,14 @@ bool MIDIDevice::claim(Device_t *dev, int type, const uint8_t *descriptors, uint
 		} else if (type == 5) {
 			// endpoint descriptor
 			if (p[0] < 7) return false; // at least 7 bytes
-			if (p[3] != 2) return false; // must be bulk type
+			if (p[3] != 2 && p[3] != 3) return false; // must be bulk or interrupt type
 			println("    MIDI Endpoint: ", p[2], HEX);
 			switch (p[2] & 0xF0) {
 			case 0x80:
 				// IN endpoint
 				if (rx_ep == 0) {
 					rx_ep = p[2] & 0x0F;
+					rx_ep_type = p[3];
 					rx_size = p[4] | (p[5] << 8);
 					println("      rx_size = ", rx_size);
 				}
@@ -135,6 +148,7 @@ bool MIDIDevice::claim(Device_t *dev, int type, const uint8_t *descriptors, uint
 				// OUT endpoint
 				if (tx_ep == 0) {
 					tx_ep = p[2];
+					tx_ep_type = p[3];
 					tx_size = p[4] | (p[5] << 8);
 					println("      tx_size = ", tx_size);
 				}
@@ -152,7 +166,7 @@ bool MIDIDevice::claim(Device_t *dev, int type, const uint8_t *descriptors, uint
 	}
 	// if an IN endpoint was found, create its pipe
 	if (rx_ep && rx_size <= MAX_PACKET_SIZE) {
-		rxpipe = new_Pipe(dev, 2, rx_ep, 1, rx_size);
+		rxpipe = new_Pipe(dev, rx_ep_type, rx_ep, 1, rx_size);
 		if (rxpipe) {
 			rxpipe->callback_function = rx_callback;
 			queue_Data_Transfer(rxpipe, rx_buffer, rx_size, this);
@@ -163,9 +177,11 @@ bool MIDIDevice::claim(Device_t *dev, int type, const uint8_t *descriptors, uint
 	}
 	// if an OUT endpoint was found, create its pipe
 	if (tx_ep && tx_size <= MAX_PACKET_SIZE) {
-		txpipe = new_Pipe(dev, 2, tx_ep, 0, tx_size);
+		txpipe = new_Pipe(dev, tx_ep_type, tx_ep, 0, tx_size);
 		if (txpipe) {
 			txpipe->callback_function = tx_callback;
+			tx1_count = 0;
+			tx2_count = 0;
 		}
 	} else {
 		txpipe = NULL;
@@ -199,10 +215,10 @@ void MIDIDevice::rx_data(const Transfer_t *transfer)
 {
 	println("MIDIDevice Receive");
 	print("  MIDI Data: ");
-	print_hexbytes(transfer->buffer, rx_size);
+	uint32_t len = (transfer->length - ((transfer->qtd.token >> 16) & 0x7FFF)) >> 2;
+	print_hexbytes(transfer->buffer, len * 4);
 	uint32_t head = rx_head;
 	uint32_t tail = rx_tail;
-	uint32_t len = rx_size >> 2; // TODO: use actual received length
 	for (uint32_t i=0; i < len; i++) {
 		uint32_t msg = rx_buffer[i];
 		if (msg) {
@@ -213,7 +229,7 @@ void MIDIDevice::rx_data(const Transfer_t *transfer)
 	rx_head = head;
 	rx_tail = tail;
 	uint32_t avail = (head < tail) ? tail - head - 1 : RX_QUEUE_SIZE - 1 - head + tail;
-	println("rx_size = ", rx_size);
+	//println("rx_size = ", rx_size);
 	println("avail = ", avail);
 	if (avail >= (uint32_t)(rx_size>>2)) {
 		// enough space to accept another full packet
@@ -233,7 +249,11 @@ void MIDIDevice::tx_data(const Transfer_t *transfer)
 	println("MIDIDevice transmit complete");
 	print("  MIDI Data: ");
 	print_hexbytes(transfer->buffer, tx_size);
-	// TODO: return the buffer to the pool...
+	if (transfer->buffer == tx_buffer1) {
+		tx1_count = 0;
+	} else if (transfer->buffer == tx_buffer2) {
+		tx2_count = 0;
+	}
 }
 
 
@@ -247,11 +267,96 @@ void MIDIDevice::disconnect()
 }
 
 
-
-
-bool MIDIDevice::read(uint8_t channel, uint8_t cable)
+void MIDIDevice::write_packed(uint32_t data)
 {
-	uint32_t n, head, tail, avail, ch, type1, type2;
+	if (!txpipe) return;
+	uint32_t tx_max = tx_size / 4;
+	while (1) {
+		uint32_t tx1 = tx1_count;
+		uint32_t tx2 = tx2_count;
+		if (tx1 < tx_max && (tx2 == 0 || tx2 >= tx_max)) {
+			// use tx_buffer1
+			tx_buffer1[tx1++] = data;
+			tx1_count = tx1;
+			if (tx1 >= tx_max) {
+				queue_Data_Transfer(txpipe, tx_buffer1, tx_max*4, this);
+			} else {
+				// TODO: start a timer, rather than sending the buffer
+				// before it's full, to make best use of bandwidth
+				tx1_count = tx_max;
+				queue_Data_Transfer(txpipe, tx_buffer1, tx_max*4, this);
+			}
+			return;
+		}
+		if (tx2 < tx_max) {
+			// use tx_buffer2
+			tx_buffer2[tx2++] = data;
+			tx2_count = tx2;
+			if (tx2 >= tx_max) {
+				queue_Data_Transfer(txpipe, tx_buffer2, tx_max*4, this);
+			} else {
+				// TODO: start a timer, rather than sending the buffer
+				// before it's full, to make best use of bandwidth
+				tx2_count = tx_max;
+				queue_Data_Transfer(txpipe, tx_buffer2, tx_max*4, this);
+			}
+			return;
+		}
+	}
+}
+
+void MIDIDevice::send_sysex_buffer_has_term(const uint8_t *data, uint32_t length, uint8_t cable)
+{
+	cable = (cable & 0x0F) << 4;
+	while (length > 3) {
+		write_packed(0x04 | cable | (data[0] << 8) | (data[1] << 16) | (data[2] << 24));
+		data += 3;
+		length -= 3;
+	}
+	if (length == 3) {
+		write_packed(0x07 | cable | (data[0] << 8) | (data[1] << 16) | (data[2] << 24));
+	} else if (length == 2) {
+		write_packed(0x06 | cable | (data[0] << 8) | (data[1] << 16));
+	} else if (length == 1) {
+		write_packed(0x05 | cable | (data[0] << 8));
+	}
+}
+
+void MIDIDevice::send_sysex_add_term_bytes(const uint8_t *data, uint32_t length, uint8_t cable)
+{
+	cable = (cable & 0x0F) << 4;
+
+	if (length == 0) {
+		write_packed(0x06 | cable | (0xF0 << 8) | (0xF7 << 16));
+		return;
+	} else if (length == 1) {
+		write_packed(0x07 | cable | (0xF0 << 8) | (data[0] << 16) | (0xF7 << 24));
+		return;
+	} else {
+		write_packed(0x04 | cable | (0xF0 << 8) | (data[0] << 16) | (data[1] << 24));
+		data += 2;
+		length -= 2;
+	}
+	while (length >= 3) {
+		write_packed(0x04 | cable | (data[0] << 8) | (data[1] << 16) | (data[2] << 24));
+		data += 3;
+		length -= 3;
+	}
+	if (length == 2) {
+		write_packed(0x07 | cable | (data[0] << 8) | (data[1] << 16) | (0xF7 << 24));
+	} else if (length == 1) {
+		write_packed(0x06 | cable | (data[0] << 8) | (0xF7 << 16));
+	} else {
+		write_packed(0x05 | cable | (0xF7 << 8));
+	}
+}
+
+
+
+
+bool MIDIDevice::read(uint8_t channel)
+{
+	uint32_t n, head, tail, avail, ch, type1, type2, b1;
 
 	head = rx_head;
 	tail = rx_tail;
@@ -267,62 +372,148 @@ bool MIDIDevice::read(uint8_t channel, uint8_t cable)
 			__enable_irq();
 		}
 	}
-
 	println("read: ", n, HEX);
 
 	type1 = n & 15;
 	type2 = (n >> 12) & 15;
-	ch = ((n >> 8) & 15) + 1;
+	b1 = (n >> 8) & 0xFF;
+	ch = (b1 & 15) + 1;
+	msg_cable = (n >> 4) & 15;
 	if (type1 >= 0x08 && type1 <= 0x0E) {
 		if (channel && channel != ch) {
 			// ignore other channels when user wants single channel read
 			return false;
 		}
 		if (type1 == 0x08 && type2 == 0x08) {
-			msg_type = 8;			// 8 = Note off
-			if (handleNoteOff)
+			msg_type = 0x80;		// 0x80 = Note off
+			if (handleNoteOff) {
 				(*handleNoteOff)(ch, (n >> 16), (n >> 24));
+			}
 		} else
 		if (type1 == 0x09 && type2 == 0x09) {
 			if ((n >> 24) > 0) {
-				msg_type = 9;		// 9 = Note on
-				if (handleNoteOn)
+				msg_type = 0x90;	// 0x90 = Note on
+				if (handleNoteOn) {
 					(*handleNoteOn)(ch, (n >> 16), (n >> 24));
+				}
 			} else {
-				msg_type = 8;		// 8 = Note off
-				if (handleNoteOff)
+				msg_type = 0x80;	// 0x80 = Note off
+				if (handleNoteOff) {
 					(*handleNoteOff)(ch, (n >> 16), (n >> 24));
+				}
 			}
 		} else
 		if (type1 == 0x0A && type2 == 0x0A) {
-			msg_type = 10;			// 10 = Poly Pressure
-			if (handleVelocityChange)
+			msg_type = 0xA0;		// 0xA0 = AfterTouchPoly
+			if (handleVelocityChange) {
 				(*handleVelocityChange)(ch, (n >> 16), (n >> 24));
+			}
 		} else
-			if (type1 == 0x0B && type2 == 0x0B) {
-			msg_type = 11;			// 11 = Control Change
-			if (handleControlChange)
+		if (type1 == 0x0B && type2 == 0x0B) {
+			msg_type = 0xB0;		// 0xB0 = Control Change
+			if (handleControlChange) {
 				(*handleControlChange)(ch, (n >> 16), (n >> 24));
+			}
 		} else
-			if (type1 == 0x0C && type2 == 0x0C) {
-			msg_type = 12;			// 12 = Program Change
-				if (handleProgramChange) (*handleProgramChange)(ch, (n >> 16));
+		if (type1 == 0x0C && type2 == 0x0C) {
+			msg_type = 0xC0;		// 0xC0 = Program Change
+			if (handleProgramChange) {
+				(*handleProgramChange)(ch, (n >> 16));
+			}
 		} else
-			if (type1 == 0x0D && type2 == 0x0D) {
-			msg_type = 13;			// 13 = After Touch
-				if (handleAfterTouch) (*handleAfterTouch)(ch, (n >> 16));
+		if (type1 == 0x0D && type2 == 0x0D) {
+			msg_type = 0xD0;		// 0xD0 = After Touch
+			if (handleAfterTouch) {
+				(*handleAfterTouch)(ch, (n >> 16));
+			}
 		} else
-			if (type1 == 0x0E && type2 == 0x0E) {
-			msg_type = 14;			// 14 = Pitch Bend
-			if (handlePitchChange)
-				(*handlePitchChange)(ch, ((n >> 16) & 0x7F) | ((n >> 17) & 0x3F80));
+		if (type1 == 0x0E && type2 == 0x0E) {
+			msg_type = 0xE0;		// 0xE0 = Pitch Bend
+			if (handlePitchChange) {
+				int value = ((n >> 16) & 0x7F) | ((n >> 17) & 0x3F80);
+				value -= 8192; // 0 to 16383 --> -8192 to +8191
+				(*handlePitchChange)(ch, value);
+			}
 		} else {
 			return false;
 		}
+		return_message:
 		msg_channel = ch;
 		msg_data1 = (n >> 16);
 		msg_data2 = (n >> 24);
 		return true;
+	}
+	if (type1 == 0x02 || type1 == 0x03 || (type1 == 0x05 && b1 >= 0xF1 && b1 != 0xF7)) {
+		// system common or system realtime message
+		system_common_or_realtime:
+		switch (b1) {
+		case 0xF1: // usbMIDI.TimeCodeQuarterFrame
+			if (handleTimeCodeQuarterFrame) {
+				(*handleTimeCodeQuarterFrame)(n >> 16);
+			}
+			break;
+		case 0xF2: // usbMIDI.SongPosition
+			if (handleSongPosition) {
+				(*handleSongPosition)(((n >> 16) & 0x7F) | ((n >> 17) & 0x3F80));
+			}
+			break;
+		case 0xF3: // usbMIDI.SongSelect
+			if (handleSongSelect) {
+				(*handleSongSelect)(n >> 16);
+			}
+			break;
+		case 0xF6: // usbMIDI.TuneRequest
+			if (handleTuneRequest) {
+				(*handleTuneRequest)();
+			}
+			break;
+		case 0xF8: // usbMIDI.Clock
+			if (handleClock) {
+				(*handleClock)();
+			} else if (handleRealTimeSystem) {
+				(*handleRealTimeSystem)(0xF8);
+			}
+			break;
+		case 0xFA: // usbMIDI.Start
+			if (handleStart) {
+				(*handleStart)();
+			} else if (handleRealTimeSystem) {
+				(*handleRealTimeSystem)(0xFA);
+			}
+			break;
+		case 0xFB: // usbMIDI.Continue
+			if (handleContinue) {
+				(*handleContinue)();
+			} else if (handleRealTimeSystem) {
+				(*handleRealTimeSystem)(0xFB);
+			}
+			break;
+		case 0xFC: // usbMIDI.Stop
+			if (handleStop) {
+				(*handleStop)();
+			} else if (handleRealTimeSystem) {
+				(*handleRealTimeSystem)(0xFC);
+			}
+			break;
+		case 0xFE: // usbMIDI.ActiveSensing
+			if (handleActiveSensing) {
+				(*handleActiveSensing)();
+			} else if (handleRealTimeSystem) {
+				(*handleRealTimeSystem)(0xFE);
+			}
+			break;
+		case 0xFF: // usbMIDI.SystemReset
+			if (handleSystemReset) {
+				(*handleSystemReset)();
+			} else if (handleRealTimeSystem) {
+				(*handleRealTimeSystem)(0xFF);
+			}
+			break;
+		default:
+			return false; // unknown message, ignore it
+		}
+		msg_type = b1;
+		goto return_message;
 	}
 	if (type1 == 0x04) {
 		sysex_byte(n >> 8);
@@ -331,29 +522,42 @@ bool MIDIDevice::read(uint8_t channel, uint8_t cable)
 		return false;
 	}
 	if (type1 >= 0x05 && type1 <= 0x07) {
-		sysex_byte(n >> 8);
+		sysex_byte(b1);
+		// allow for buggy devices which use code 5 to transmit 1 byte at a time
+		// https://forum.pjrc.com/threads/43450?p=164596&viewfull=1#post164596
+		if (type1 == 0x05 && b1 != 0xF7) return false;
 		if (type1 >= 0x06) sysex_byte(n >> 16);
 		if (type1 == 0x07) sysex_byte(n >> 24);
-		msg_data1 = msg_sysex_len;
+		uint16_t len = msg_sysex_len;
+		msg_data1 = len;
+		msg_data2 = len >> 8;
 		msg_sysex_len = 0;
-		msg_type = 15;			// 15 = Sys Ex
-		if (handleSysEx)
-			(*handleSysEx)(msg_sysex, msg_data1, 1);
+		msg_type = 0xF0;			// 0xF0 = SystemExclusive
+		if (handleSysExPartial) {
+			(*handleSysExPartial)(msg_sysex, len, 1);
+		} else if (handleSysExComplete) {
+			(*handleSysExComplete)(msg_sysex, len);
+		}
 		return true;
 	}
-	// TODO: single byte messages
-	// TODO: time code messages?
+	if (type1 == 0x0F) {
+		if (b1 >= 0xF8) {
+			goto system_common_or_realtime;
+		}
+		if (b1 == 0xF0 || msg_sysex_len > 0) {
+			// Is this really needed?  Mac OS-X does this, but do any devices?
+			sysex_byte(b1);
+		}
+	}
 	return false;
 }
 
 void MIDIDevice::sysex_byte(uint8_t b)
 {
-	// when buffer is full, send another chunk to handler.
-	if (msg_sysex_len >= SYSEX_MAX_LEN) {
-		if (handleSysEx) {
-			(*handleSysEx)(msg_sysex, msg_sysex_len, 0);
-			msg_sysex_len = 0;
-		}
+	if (handleSysExPartial && msg_sysex_len >= SYSEX_MAX_LEN) {
+		// when buffer is full, send another chunk to partial handler.
+		(*handleSysExPartial)(msg_sysex, msg_sysex_len, 0);
+		msg_sysex_len = 0;
 	}
 	if (msg_sysex_len < SYSEX_MAX_LEN) {
 		msg_sysex[msg_sysex_len++] = b;

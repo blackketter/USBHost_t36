@@ -128,21 +128,19 @@ bool USBHIDParser::claim(Device_t *dev, int type, const uint8_t *descriptors, ui
 		if (((endpoint1 & 0xF0) == 0x80) && ((endpoint2 & 0xF0) == 0)) {
 			// first endpoint is IN, second endpoint is OUT
 			in_pipe = new_Pipe(dev, 3, endpoint1 & 0x0F, 1, size1, interval1);
-			//out_pipe = new_Pipe(dev, 3, endpoint2, 0, size2, interval2);
-			out_pipe = NULL; // TODO; fixme
+			out_pipe = new_Pipe(dev, 3, endpoint2, 0, size2, interval2);
 			in_size = size1;
 			out_size = size2;
 		} else if (((endpoint1 & 0xF0) == 0) && ((endpoint2 & 0xF0) == 0x80)) {
 			// first endpoint is OUT, second endpoint is IN
 			in_pipe = new_Pipe(dev, 3, endpoint2 & 0x0F, 1, size2, interval2);
-			//out_pipe = new_Pipe(dev, 3, endpoint1, 0, size1, interval1);
-			out_pipe = NULL; // TODO; fixme
+			out_pipe = new_Pipe(dev, 3, endpoint1, 0, size1, interval1);
 			in_size = size2;
 			out_size = size1;
 		} else {
 			return false;
 		}
-		//out_pipe->callback_function = out_callback;
+		out_pipe->callback_function = out_callback;
 	}
 	in_pipe->callback_function = in_callback;
 	for (uint32_t i=0; i < TOPUSAGE_LIST_LEN; i++) {
@@ -185,6 +183,7 @@ void USBHIDParser::in_callback(const Transfer_t *transfer)
 
 void USBHIDParser::out_callback(const Transfer_t *transfer)
 {
+	//println("USBHIDParser:: out_callback (static)");
 	if (transfer->driver) {
 		((USBHIDParser*)(transfer->driver))->out_data(transfer);
 	}
@@ -206,23 +205,30 @@ void USBHIDParser::disconnect()
 // Called when the HID device sends a report
 void USBHIDParser::in_data(const Transfer_t *transfer)
 {
-	/*Serial.print("HID: ");
+	/*Serial.printf("HID: ");
 	uint8_t *pb = (uint8_t*)transfer->buffer;
 	for (uint8_t i = 0; i < transfer->length; i++) {
-		Serial.print(pb[i], HEX);
-		Serial.print(" ");
+		Serial.printf("%x ",pb[i]);
 	}
-	Serial.println(); */
+	Serial.printf("\n"); */
 
 	print("HID: ");
+	print(use_report_id);
+	print(" - ");
 	print_hexbytes(transfer->buffer, transfer->length);
 	const uint8_t *buf = (const uint8_t *)transfer->buffer;
 	uint32_t len = transfer->length;
-	if (use_report_id == false) {
-		parse(0x0100, buf, len);
-	} else {
-		if (len > 1) {
-			parse(0x0100 | buf[0], buf + 1, len - 1);
+
+	// See if the first top report wishes to bypass the
+	// parse...
+	if (!(topusage_drivers[0] && topusage_drivers[0]->hid_process_in_data(transfer))) {
+
+		if (use_report_id == false) {
+			parse(0x0100, buf, len);
+		} else {
+			if (len > 1) {
+				parse(0x0100 | buf[0], buf + 1, len - 1);
+			}
 		}
 	}
 	queue_Data_Transfer(in_pipe, report, in_size, this);
@@ -231,7 +237,61 @@ void USBHIDParser::in_data(const Transfer_t *transfer)
 
 void USBHIDParser::out_data(const Transfer_t *transfer)
 {
+	println("USBHIDParser:out_data called (instance)");
+	// A packet completed. lets mark it as done and call back
+	// to top reports handler.  We unmark our checkmark to
+	// handle case where they may want to queue up another one. 
+	if (transfer->buffer == tx1) txstate &= ~1;
+	if (transfer->buffer == tx2) txstate &= ~2;
+	if (topusage_drivers[0]) {
+		topusage_drivers[0]->hid_process_out_data(transfer);
+	}
 }
+
+bool USBHIDParser::sendPacket(const uint8_t *buffer, int cb) {
+	if (!out_size || !out_pipe) return false;	
+	if (!tx1) {
+		// Was not init before, for now lets put it at end of descriptor
+		// TODO: should verify that either don't exceed overlap descsize
+		//       Or that we have taken over this device
+		tx1 = &descriptor[sizeof(descriptor) - out_size];
+		tx2 = tx1 - out_size;
+	}
+	if ((txstate & 3) == 3) return false; 	// both transmit buffers are full
+	if (cb == -1)
+		cb = out_size;
+	uint8_t *p = tx1;
+	if ((txstate & 1) == 0) {
+		txstate |= 1;
+	} else {
+		if (!tx2) 
+			return false; // only one buffer
+		txstate |= 2;
+		p = tx2;
+	}
+	// copy the users data into our out going buffer
+	memcpy(p, buffer, cb);	
+	println("USBHIDParser Send packet");
+	print_hexbytes(buffer, cb);
+	queue_Data_Transfer(out_pipe, p, cb, this);
+	println("    Queue_data transfer returned");
+	return true;
+}
+
+void USBHIDParser::setTXBuffers(uint8_t *buffer1, uint8_t *buffer2, uint8_t cb)
+{
+	tx1 = buffer1;
+	tx2 = buffer2;
+}
+
+bool USBHIDParser::sendControlPacket(uint32_t bmRequestType, uint32_t bRequest,
+			uint32_t wValue, uint32_t wIndex, uint32_t wLength, void *buf)
+{
+	// Use setup structure to build packet 
+	mk_setup(setup, bmRequestType, bRequest, wValue, wIndex, wLength); // ps3 tell to send report 1?
+	return queue_Control_Transfer(device, &setup, buf, this);
+}
+
 
 // This no-inputs parse is meant to be used when we first get the
 // HID report descriptor.  It finds all the top level collections
@@ -333,9 +393,11 @@ USBHIDInput * USBHIDParser::find_driver(uint32_t topusage)
 {
 	println("find_driver");
 	USBHIDInput *driver = available_hid_drivers_list;
+	hidclaim_t claim_type;
 	while (driver) {
 		println("  driver ", (uint32_t)driver, HEX);
-		if (driver->claim_collection(device, topusage)) {
+		if ((claim_type = driver->claim_collection(this, device, topusage)) != CLAIM_NO) {
+			if (claim_type == CLAIM_INTERFACE) hid_driver_claimed_control_ = true;
 			return driver;
 		}
 		driver = driver->next;
@@ -399,6 +461,7 @@ void USBHIDParser::parse(uint16_t type_and_report_id, const uint8_t *data, uint3
 	uint16_t report_size = 0;
 	uint16_t report_count = 0;
 	uint16_t usage_page = 0;
+	uint32_t last_usage = 0;
 	int32_t logical_min = 0;
 	int32_t logical_max = 0;
 	uint32_t bitindex = 0;
@@ -506,23 +569,38 @@ void USBHIDParser::parse(uint16_t type_and_report_id, const uint8_t *data, uint3
 				if ((val & 2)) {
 					// ordinary variable format
 					uint32_t uindex = 0;
+					uint32_t uindex_max = 0xffff;	// assume no MAX
 					bool uminmax = false;
-					if (usage_count > USAGE_LIST_LEN || usage_count == 0) {
+					if (usage_count > USAGE_LIST_LEN) {
 						// usage numbers by min/max, not from list
 						uindex = usage[0];
+						uindex_max = usage[1];
+						uminmax = true;
+					} else if ((report_count > 1) && (usage_count <= 1)) {
+						// Special cases:  Either only one or no usages specified and there are more than one 
+						// report counts .  
+						if (usage_count == 1) {
+							uindex = usage[0];
+						} else {
+							// BUGBUG:: Not sure good place to start?  maybe round up from last usage to next higher group up of 0x100?
+							uindex = (last_usage & 0xff00) + 0x100;
+						}
 						uminmax = true;
 					}
+					//Serial.printf("TU:%x US:%x %x %d %d: C:%d, %d, MM:%d, %x %x\n", topusage, usage_page, val, logical_min, logical_max, 
+					//			report_count, usage_count, uminmax, usage[0], usage[1]);
 					for (uint32_t i=0; i < report_count; i++) {
 						uint32_t u;
 						if (uminmax) {
 							u = uindex;
-							if (uindex < usage[1]) uindex++;
+							if (uindex < uindex_max) uindex++;
 						} else {
 							u = usage[uindex++];
 							if (uindex >= USAGE_LIST_LEN-1) {
 								uindex = USAGE_LIST_LEN-1;
 							}
 						}
+						last_usage = u;	// remember the last one we used... 
 						u |= (uint32_t)usage_page << 16;
 						print("  usage = ", u, HEX);
 

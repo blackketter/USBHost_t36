@@ -1045,6 +1045,10 @@ bool USBHost::allocate_interrupt_pipe_bandwidth(Pipe_t *pipe, uint32_t maxlen, u
 		// a 125 us micro frame can fit 7500 bytes, or 234 of our 32-byte units
 		// fail if the best found needs more than 80% (234 * 0.8) in any uframe
 		if (best_bandwidth > 187) return false;
+		// save essential bandwidth specs, for cleanup in delete_Pipe
+		pipe->bandwidth_interval = interval;
+		pipe->bandwidth_offset = best_offset;
+		pipe->bandwidth_stime = stime;
 		for (uint32_t i=best_offset; i < PERIODIC_LIST_SIZE*8; i += interval) {
 			uframe_bandwidth[i] += stime;
 		}
@@ -1113,6 +1117,12 @@ bool USBHost::allocate_interrupt_pipe_bandwidth(Pipe_t *pipe, uint32_t maxlen, u
 		// a 125 us micro frame can fit 7500 bytes, or 234 of our 32-byte units
 		// fail if the best found needs more than 80% (234 * 0.8) in any uframe
 		if (best_bandwidth > 187) return false;
+		// save essential bandwidth specs, for cleanup in delete_Pipe
+		pipe->bandwidth_interval = interval;
+		pipe->bandwidth_offset = best_offset;
+		pipe->bandwidth_shift = best_shift;
+		pipe->bandwidth_stime = stime;
+		pipe->bandwidth_ctime = ctime;
 		for (uint32_t i=best_offset; i < PERIODIC_LIST_SIZE; i += interval) {
 			uint32_t n = (i << 3) + best_shift;
 			uframe_bandwidth[n+0] += stime;
@@ -1252,12 +1262,28 @@ void USBHost::delete_Pipe(Pipe_t *pipe)
 			// TODO: does this write interfere UPI & UAI (bits 18 & 19) ??
 		}
 		// find & free all the transfers which completed
+		println("  Free transfers");
 		Transfer_t *t = async_followup_first;
 		while (t) {
+			print("    * ", (uint32_t)t);
 			Transfer_t *next = t->next_followup;
 			if (t->pipe == pipe) {
+				print(" * remove");
 				remove_from_async_followup_list(t);
-				free_Transfer(t);
+
+				// Only free if not in QH list
+				Transfer_t *tr = (Transfer_t *)(pipe->qh.next);
+				while (((uint32_t)tr & 0xFFFFFFE0) && (tr != t)){
+					tr  = (Transfer_t *)(tr->qtd.next);
+				}
+				if (tr == t) {
+					println(" * defer free until QH");
+				} else {
+					println(" * free");
+					free_Transfer(t);  // The later code should actually free it...
+				}
+			} else {
+				println("");
 			}
 			t = next;
 		}
@@ -1283,15 +1309,52 @@ void USBHost::delete_Pipe(Pipe_t *pipe)
 				prev = node;
 			}
 		}
-		// TODO: subtract bandwidth from uframe_bandwidth array
+		// subtract bandwidth from uframe_bandwidth array
+		if (pipe->device->speed == 2) {
+			uint32_t interval = pipe->bandwidth_interval;
+			uint32_t offset = pipe->bandwidth_offset;
+			uint32_t stime = pipe->bandwidth_stime;
+			for (uint32_t i=offset; i < PERIODIC_LIST_SIZE*8; i += interval) {
+				uframe_bandwidth[i] -= stime;
+			}
+		} else {
+			uint32_t interval = pipe->bandwidth_interval;
+			uint32_t offset = pipe->bandwidth_offset;
+			uint32_t shift = pipe->bandwidth_shift;
+			uint32_t stime = pipe->bandwidth_stime;
+			uint32_t ctime = pipe->bandwidth_ctime;
+			for (uint32_t i=offset; i < PERIODIC_LIST_SIZE; i += interval) {
+				uint32_t n = (i << 3) + shift;
+				uframe_bandwidth[n+0] -= stime;
+				uframe_bandwidth[n+2] -= ctime;
+				uframe_bandwidth[n+3] -= ctime;
+				uframe_bandwidth[n+4] -= ctime;
+			}
+		}
 
 		// find & free all the transfers which completed
+		println("  Free transfers");
 		Transfer_t *t = periodic_followup_first;
 		while (t) {
+			print("    * ", (uint32_t)t);
 			Transfer_t *next = t->next_followup;
 			if (t->pipe == pipe) {
+				print(" * remove");
 				remove_from_periodic_followup_list(t);
-				free_Transfer(t);
+
+				// Only free if not in QH list
+				Transfer_t *tr = (Transfer_t *)(pipe->qh.next);
+				while (((uint32_t)tr & 0xFFFFFFE0) && (tr != t)){
+					tr  = (Transfer_t *)(tr->qtd.next);
+				}
+				if (tr == t) {
+					println(" * defer free until QH");
+				} else {
+					println(" * free");
+					free_Transfer(t);  // The later code should actually free it...
+				}
+			} else {
+				println("");
 			}
 			t = next;
 		}
@@ -1300,14 +1363,17 @@ void USBHost::delete_Pipe(Pipe_t *pipe)
 	// TODO: do we need to look at pipe->qh.current ??
 	//
 	// free all the transfers still attached to the QH
+	println("  Free transfers attached to QH");
 	Transfer_t *tr = (Transfer_t *)(pipe->qh.next);
 	while ((uint32_t)tr & 0xFFFFFFE0) {
+		println("    * ", (uint32_t)tr);
 		Transfer_t *next = (Transfer_t *)(tr->qtd.next);
 		free_Transfer(tr);
 		tr = next;
 	}
 	// hopefully we found everything...
 	free_Pipe(pipe);
+	println("* Delete Pipe completed");
 }
 
 
